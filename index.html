@@ -33,6 +33,7 @@ const RPM_MAX     = 9000;     // end of RPM bar (motor RPM)
 const RPM_RED     = 8000;     // start of red zone
 const WARN_FET_C  = 80, WARN_MOTOR_C = 100;  // warning thresholds
 const POLL_MS     = 100;
+const MODE_NAMES  = {1:'C', 2:'B', 3:'A'};   // throttle switch position -> label
 
 // ======================= BLE / PROTOCOL =======================
 const NUS    = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
@@ -189,7 +190,7 @@ function render(v){
   const m=tachToM(v.tachAbs-tripStartTach);
   tripTxt.textContent = (useKmh? m/1000 : m/1609.344).toFixed(2); tripU.textContent = useKmh?'km':'mi';
   ampTxt.textContent = Math.round(v.iIn); whTxt.textContent = v.wh.toFixed(1); rgnTxt.textContent = v.whc.toFixed(1);
-  modeTxt.textContent = 'MODE-'+(v.mode??'–');
+  modeTxt.textContent = 'MODE-'+(MODE_NAMES[v.mode]??'–');
   chipRegen.show(v.iIn < -0.5);
   chipFault.show(v.fault!==0);
   warnTxt.textContent = v.fault!==0 ? FAULTS[v.fault]||('FAULT '+v.fault)

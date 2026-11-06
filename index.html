@@ -17,11 +17,37 @@
              background:rgba(0,0,0,.72); color:#e8e8e8; font:700 22px "Avenir Next Condensed",sans-serif; letter-spacing:.08em; }
   #overlay small { margin-top:10px; font-size:13px; color:#9a9a9a; letter-spacing:.02em; font-weight:500; text-align:center; padding:0 20px; }
   #overlay.hidden { display:none; }
+  /* ---- diagnostics panel (long-press the clock, or open with ?diag) ---- */
+  #diag { position:fixed; inset:0; background:rgba(5,6,7,.96); color:#e8e8e8; display:none; flex-direction:column;
+          font:500 13px -apple-system,system-ui,sans-serif; padding:10px; padding-top:max(10px,env(safe-area-inset-top)); box-sizing:border-box; z-index:10; }
+  #diag.open { display:flex; }
+  #diag h2 { margin:0 0 6px; font:700 16px "Avenir Next Condensed",sans-serif; letter-spacing:.05em; }
+  #diag .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px; }
+  #diag button { font:600 14px -apple-system,system-ui,sans-serif; padding:9px 12px; border:0; border-radius:8px; background:#2b2d30; color:#e8e8e8; }
+  #diag button.go { background:#318193; color:#fff; }
+  #diag #dgStatus { color:#9a9a9a; margin-bottom:6px; min-height:1.2em; }
+  #diag #dgOut { flex:1; overflow:auto; background:#0d0e10; border:1px solid #2b2d30; border-radius:8px; padding:8px;
+                 font:12px ui-monospace,Menlo,monospace; white-space:pre; -webkit-user-select:text; user-select:text; }
+  #diag table { border-collapse:collapse; font:12px ui-monospace,Menlo,monospace; }
+  #diag td, #diag th { border:1px solid #2b2d30; padding:3px 6px; text-align:right; }
+  #diag th { color:#9a9a9a; font-weight:600; }
 </style>
 </head>
 <body>
 <svg id="dash" viewBox="0 0 800 420" preserveAspectRatio="xMidYMid meet"></svg>
 <div id="overlay"><div>TAP TO CONNECT</div><small id="ovmsg">Close the TruMoto app first. Turn phone sideways.</small></div>
+<div id="diag">
+  <h2>DIAGNOSTICS — per-mode config</h2>
+  <div class="row">
+    <button id="dgConnect">Connect</button>
+    <button id="dgRead" class="go">Read config</button>
+    <button id="dgClear">Clear</button>
+    <button id="dgCopy">Copy report</button>
+    <button id="dgClose">Close</button>
+  </div>
+  <div id="dgStatus">Set the throttle switch, tap Read config. Repeat for each mode (A, B, C).</div>
+  <div id="dgOut"></div>
+</div>
 
 <script>
 // ======================= CONFIG (from your controller's motor config) =======================
@@ -37,6 +63,8 @@ const POWER_MAX_KW = 14;      // power bar full   (~180 A x 76 V)
 const REGEN_MAX_KW = 4;       // regen bar full
 const BATT_EMPTY_PCT = 5;     // battery bar reads empty here (5% = 3.3 V/cell = 69.3 V on 21s)
 const MODE_NAMES  = {1:'C', 2:'B', 3:'A'};   // throttle switch position -> label
+const DEV_MODE    = true || new URLSearchParams(location.search).has('dev');   // true (or open with ?dev) = skip 'tap to connect' so the UI can be used in a desktop browser
+const DEV_SELFTEST = false;  // dev only: true = power-on self-test look (all 8s, every bar full, every chip on); false = blank readouts
 
 // ======================= BLE / PROTOCOL =======================
 const NUS    = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
@@ -48,6 +76,9 @@ const CMD_FW_VERSION = 0x3E, CMD_GET_VALUES = 0x42;
 function crc16(bytes){let c=0;for(const b of bytes){c^=b<<8;for(let i=0;i<8;i++)c=(c&0x8000)?((c<<1)^0x1021)&0xffff:(c<<1)&0xffff;}return c;}
 function frame(p){p=Uint8Array.from(p);const c=crc16(p);return Uint8Array.from([2,p.length,...p,c>>8,c&255,3]);}
 const PKT_FW = frame([CMD_FW_VERSION]), PKT_VALUES = frame([CMD_GET_VALUES]);
+// diagnostics only — also read-only; these are the same requests the TruMoto app sends when it connects
+const CMD_GET_MCCONF = 0x4C, CMD_GET_APPCONF = 0x4F;   // std 0x0E / 0x11
+const PKT_MCCONF = frame([CMD_GET_MCCONF]), PKT_APPCONF = frame([CMD_GET_APPCONF]);
 
 // ======================= SETTINGS (tap to toggle, remembered) =======================
 const store = { get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v);}catch{return d;}},
@@ -193,6 +224,9 @@ function setDigits(n){
 }
 const unitTxt = txt(SPEED_X+3*(DIG.w+DIG.gap)+2, SPEED_Y+DIG.h, '', {'font-size':24,class:'tap'});
 unitTxt.style.fill='#85888c'; unitTxt.style.fontWeight='500';   // grey, lighter weight
+const speedG=el('g',{class:'tap',style:'user-select:none;-webkit-user-select:none;-webkit-touch-callout:none'});
+el('rect',{x:SPEED_X-4,y:SPEED_Y-4,width:3*(DIG.w+DIG.gap)+60,height:DIG.h+8,fill:'transparent'},speedG);   // invisible touch box over the speed
+digits.forEach(p=>speedG.appendChild(p.parentNode)); speedG.appendChild(unitTxt);
 
 // --- power box (where the R1 shows gear) ---
 const PB={dx:22, dy:-22};   // power box offset (moved up/right to sit just under the speed)
@@ -206,24 +240,24 @@ const kwG = el('g',{},pbG), KW_RIGHT = 504+PB.dx, KW_BASE = 373+PB.dy;   // bott
 function setKw(str){
   kwG.innerHTML=''; const D=KW_DIG, dotW=D.t*1.6; let x=KW_RIGHT;
   for(const ch of [...str].reverse()){
-    if(ch==='.'){ x-=dotW; el('rect',{x:x+(dotW-D.t)/2,y:KW_BASE-D.t,width:D.t,height:D.t,rx:D.t*0.25,fill:'#2ecc71'},kwG); x-=D.gap*0.4; continue; }
+    if(ch==='.'){ x-=dotW; el('rect',{x:x+(dotW-D.t)/2,y:KW_BASE-D.t,width:D.t,height:D.t,rx:D.t*0.25,fill:'#ececec'},kwG); x-=D.gap*0.4; continue; }
     const adv = ch==='1' ? ONE_FLAG*D.w + D.t : D.w;          // '1' takes only the space it needs here (no LCD gap)
     x-=adv; const g=el('g',{transform:`translate(${(x-(D.w-adv)).toFixed(1)},${KW_BASE-D.h})`},kwG);
     const d = ch==='-' ? `M${D.t/2},${D.h/2} H${D.w-D.t/2}` : digitPath(ch,D);
-    if(d) el('path',{d,fill:'none',stroke:'#2ecc71','stroke-width':D.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g);
+    if(d) el('path',{d,fill:'none',stroke:'#ececec','stroke-width':D.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g);
     x-=D.gap;
   }
 }
 setKw('0.0');
 // battery icon: solid white vertical battery with a see-through lightning bolt (moves with the Power box)
-{ const w=16, h=30, r=3, nubW=7, nubH=3.5, bx=352+PB.dx+196+9, byBot=290+PB.dy+92-5;   // 5 up from the box bottom
+{ const w=16, h=30, r=3, nubW=7, nubH=3.5, bx=352+PB.dx+196+20, byBot=290+PB.dy+92-5;   // 5 up from the box bottom
   const bi=el('g',{transform:`translate(${bx},${byBot-h})`},pbG);
   const body=`M${r},0 H${w-r} Q${w},0 ${w},${r} V${h-r} Q${w},${h} ${w-r},${h} H${r} Q0,${h} 0,${h-r} V${r} Q0,0 ${r},0 Z`;
   const bolt=`M${w*0.62},${h*0.13} L${w*0.24},${h*0.57} H${w*0.5} L${w*0.4},${h*0.89} L${w*0.78},${h*0.43} H${w*0.52} L${w*0.69},${h*0.13} Z`;
   el('path',{d:body+' '+bolt,'fill-rule':'evenodd',fill:'#ececec'},bi);                         // bolt is cut out (clear)
   el('rect',{x:(w-nubW)/2,y:-nubH,width:nubW,height:nubH+0.5,rx:1,fill:'#ececec'},bi);           // terminal
 }
-txt(540+PB.dx,373+PB.dy,'kW',{'text-anchor':'end','font-size':14,class:'dim'},pbG);
+txt(540+PB.dx,373+PB.dy,'kW',{'text-anchor':'end','font-size':24,style:'font-weight:500',class:'dim'},pbG);
 // line the power box's right edge up just past the end of 'mph'
 { const keep=unitTxt.textContent; unitTxt.textContent='mph';
   try{ const bb=unitTxt.getBBox(), right=bb.x+bb.width+7, boxRight=352+PB.dx+196;
@@ -231,11 +265,21 @@ txt(540+PB.dx,373+PB.dy,'kW',{'text-anchor':'end','font-size':14,class:'dim'},pb
   unitTxt.textContent=keep; }
 
 // --- left readouts (temps & volts) ---
-const readG=el('g',{class:'tap'});
-txt(104,240,'BATT',{'font-size':15},readG); const socTxt=txt(300,242,'--',{'text-anchor':'end','font-size':26,class:'it'},readG); txt(306,242,'%',{'font-size':14,class:'dim'},readG);
-txt(104,272,'VOLT',{'font-size':15},readG);   const voltTxt=txt(300,274,'--.-',{'text-anchor':'end','font-size':26,class:'it'},readG); txt(306,274,'V',{'font-size':14,class:'dim'},readG);
-txt(104,304,'M.TEMP',{'font-size':15},readG); const mtTxt=txt(300,306,'--',{'text-anchor':'end','font-size':26,class:'it'},readG);  const mtU=txt(306,306,'',{'font-size':14,class:'dim'},readG);
-txt(104,336,'C.TEMP',{'font-size':15},readG); const ctTxt=txt(300,338,'--',{'text-anchor':'end','font-size':26,class:'it'},readG);  const ctU=txt(306,338,'',{'font-size':14,class:'dim'},readG);
+const READ_SHIFT={x:-52,y:12};   // whole table (both pages + touch box): left/down from its original spot
+const readG=el('g',{class:'tap',transform:`translate(${READ_SHIFT.x},${READ_SHIFT.y})`,style:'user-select:none;-webkit-user-select:none;-webkit-touch-callout:none'});
+el('rect',{x:96,y:216,width:236,height:132,fill:'transparent'},readG);   // invisible touch box over the 4 rows
+const readA=el('g',{},readG), readB=el('g',{},readG);                     // page A = live data, page B = alt data
+txt(104,240,'BATT',{'font-size':18,style:'font-weight:600'},readA); const socTxt=txt(300,242,'--',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,242,'%',{'font-size':14,class:'dim'},readA);
+txt(104,272,'VOLT',{'font-size':18,style:'font-weight:600'},readA);   const voltTxt=txt(300,274,'--.-',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,274,'V',{'font-size':14,class:'dim'},readA);
+txt(104,304,'BATT CURRENT',{'font-size':18,style:'font-weight:600'},readA); const ampTxt=txt(300,306,'0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,306,'A',{'font-size':14,class:'dim'},readA);
+txt(104,336,'PHASE CURRENT',{'font-size':18,style:'font-weight:600'},readA); const phaseTxt=txt(300,338,'0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,338,'A',{'font-size':14,class:'dim'},readA);   // motor (phase) current
+// page B: trip / Wh / regen Wh (same layout as page A)
+txt(104,240,'TRIP',{'font-size':18,style:'font-weight:600'},readB); const tripTxt=txt(300,242,'0.00',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readB); const tripU=txt(306,242,'',{'font-size':14,class:'dim'},readB);
+txt(104,272,'REGEN',{'font-size':18,style:'font-weight:600'},readB); const rgnTxt=txt(300,274,'0.0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readB); txt(306,274,'Wh',{'font-size':14,class:'dim'},readB);
+txt(104,304,'ENERGY USED',{'font-size':18,style:'font-weight:600'},readB); const whTxt=txt(300,306,'0.0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readB); txt(306,306,'Wh',{'font-size':14,class:'dim'},readB);
+let readPage = store.get('readPage', 0);
+const showReadPage = ()=>{ readA.style.display = readPage ? 'none' : ''; readB.style.display = readPage ? '' : 'none'; };
+showReadPage();
 
 // --- right side, R1 style: two back-to-back brackets ---
 const RS={top:152, bot:352, spineL:688, spineR:701, arm:34};   // spines 13 apart = 8-unit clear gap (matches R_GAP)
@@ -352,11 +396,22 @@ function setBatt(frac){
 // --- bottom bar ---
 el('rect',{x:40,y:366,width:720,height:34,fill:'none',stroke:'#85888c','stroke-width':1.5});   // same width as the top banner
 const botG=el('g',{transform:'translate(-36,8)'});   // contents shifted so the MODE chip lines up with the BT chip above
-const modeChip=el('rect',{x:84,y:362,width:86,height:26,fill:'#e8e8e8'},botG); const modeTxt=txt(127,382,'MODE-–',{'text-anchor':'middle','font-size':18},botG); modeTxt.style.fill='#000';
-txt(184,384,'TRIP',{'font-size':18},botG); const tripTxt = txt(232,384,'0.00',{'font-size':22},botG); const tripU=txt(284,384,'',{'font-size':15,class:'dim'},botG);
-txt(328,384,'AMP',{'font-size':18},botG);  const ampTxt=txt(412,384,'0',{'text-anchor':'end','font-size':22},botG);
-txt(444,384,'Wh',{'font-size':18},botG);   const whTxt=txt(538,384,'0.0',{'text-anchor':'end','font-size':22},botG);
-txt(570,384,'RGN',{'font-size':18},botG);  const rgnTxt=txt(664,384,'0.0',{'text-anchor':'end','font-size':22},botG);
+const modeChip=el('rect',{x:84,y:362,width:86,height:26,fill:'#e8e8e8'},botG); const modeTxt=txt(127,382,'MODE-–',{'text-anchor':'middle','font-size':18,style:'font-weight:600'},botG); modeTxt.style.fill='#000';
+// M.TEMP and C.TEMP: each in a dark grey box (same height as the MODE chip); value sits a fixed gap after its title,
+// unit follows the value, box hugs the lot. M box starts 8 after the MODE chip, C box 8 after the M box.
+function tempCell(title){ const box=el('rect',{x:0,y:362,width:0,height:26,fill:'#1c1e21'},botG);
+  const lbl=txt(0,381.4,title,{'font-size':18,style:'font-weight:600'},botG);
+  const val=txt(0,384.5,'--',{'font-size':26,style:'font-weight:600'},botG), unit=txt(0,384.5,'',{'font-size':15,class:'dim'},botG);
+  return {box,lbl,val,unit}; }
+const mtCell=tempCell('M.TEMP'), ctCell=tempCell('C.TEMP');
+const mtTxt=mtCell.val, mtU=mtCell.unit, ctTxt=ctCell.val, ctU=ctCell.unit;
+function layoutCell(c,x){ const GAP=8, PAD=8; let tx=x+PAD;
+  c.box.setAttribute('x',x); c.lbl.setAttribute('x',tx);
+  tx+=c.lbl.getBBox().width+GAP; c.val.setAttribute('x',tx.toFixed(1));
+  tx+=c.val.getBBox().width+4;   c.unit.setAttribute('x',tx.toFixed(1));
+  const w=tx+c.unit.getBBox().width+PAD-x; c.box.setAttribute('width',w.toFixed(1)); return x+w; }
+function layoutMt(){ try{ layoutCell(ctCell, layoutCell(mtCell,178)+8); }catch{} }
+layoutMt();
 const fwTxt = txt(270,33,'',{'font-size':15,class:'dim'});
 
 // ======================= MATH =======================
@@ -381,7 +436,7 @@ function render(v){
   setKw((v.vin*v.iIn/1000).toFixed(1));
   voltTxt.textContent = v.vin.toFixed(1);
   mtTxt.textContent = Math.round(temp(v.tMot)); ctTxt.textContent = Math.round(temp(v.tFet));
-  mtU.textContent = ctU.textContent = useF?'°F':'°C';
+  mtU.textContent = ctU.textContent = useF?'°F':'°C'; layoutMt();
   // battery: smooth so it doesn't jump with voltage sag
   const s=soc(v.vin); socSmooth = socSmooth===null ? s : socSmooth + (s-socSmooth)*0.02;
   socTxt.textContent = Math.round(socSmooth);
@@ -390,7 +445,7 @@ function render(v){
   if(tripStartTach===null) tripStartTach=v.tachAbs;
   const m=tachToM(v.tachAbs-tripStartTach);
   tripTxt.textContent = (useKmh? m/1000 : m/1609.344).toFixed(2); tripU.textContent = useKmh?'km':'mi';
-  ampTxt.textContent = Math.round(v.iIn); whTxt.textContent = v.wh.toFixed(1); rgnTxt.textContent = v.whc.toFixed(1);
+  ampTxt.textContent = Math.round(v.iIn); phaseTxt.textContent = Math.round(v.iMot); whTxt.textContent = v.wh.toFixed(1); rgnTxt.textContent = v.whc.toFixed(1);
   modeTxt.textContent = 'MODE-'+(MODE_NAMES[v.mode]??'–');
   // power / regen fills (light smoothing so they move like a gauge)
   const kwNow = v.vin*v.iIn/1000;
@@ -407,12 +462,34 @@ const FAULTS=['NONE','OVER VOLTAGE','UNDER VOLTAGE','DRV','ABS OVER CURRENT','FE
   'ENCODER SINCOS HIGH','FLASH CORRUPTION','CURRENT SENSOR 1','CURRENT SENSOR 2','CURRENT SENSOR 3','UNBALANCED CURRENTS',
   'BRK','RESOLVER LOT','RESOLVER DOS','RESOLVER LOS','FLASH APP CFG','FLASH MC CFG','ENCODER NO MAGNET','MAGNET TOO STRONG','PHASE FILTER'];
 
-// taps: speed unit toggles mph/kmh, temps toggle °C/°F
-unitTxt.addEventListener('click',e=>{e.stopPropagation();useKmh=!useKmh;store.set('kmh',useKmh);last&&render(last);});
-readG.addEventListener('click',e=>{e.stopPropagation();useF=!useF;store.set('degF',useF);last&&render(last);});
-setInterval(()=>{const d=new Date();clockTxt.textContent=d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');},1000);
-const tick=()=>{const d=new Date();clockTxt.textContent=d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');}; tick();
+// taps: speedo long-press (or tap 'mph') toggles mph/kmh; left readouts: tap flips data page, long-press toggles °C/°F
+function onPress(target, onLong, onTap, LONG_MS=600){
+  let timer=null, fired=false; const cancel=()=>{clearTimeout(timer); timer=null;};
+  target.addEventListener('pointerdown',()=>{ fired=false; cancel(); timer=setTimeout(()=>{ fired=true; onLong(); },LONG_MS); });
+  ['pointerup','pointerleave','pointercancel'].forEach(t=>target.addEventListener(t,cancel));
+  target.addEventListener('contextmenu',e=>e.preventDefault());     // no long-press menu on touch screens
+  target.addEventListener('click',e=>{ e.stopPropagation(); if(fired){fired=false;return;} onTap&&onTap(e); });
+}
+const toggleSpeedUnit=()=>{ useKmh=!useKmh; store.set('kmh',useKmh); unitTxt.textContent=useKmh?'km/h':'mph'; last ? render(last) : DEV_MODE&&DEV_SELFTEST&&devPlaceholders(); };
+onPress(speedG, toggleSpeedUnit, e=>{ if(e.target===unitTxt) toggleSpeedUnit(); });
+onPress(readG, ()=>{ useF=!useF; store.set('degF',useF); last ? render(last) : DEV_MODE&&DEV_SELFTEST&&devPlaceholders(); },
+               ()=>{ readPage=readPage?0:1; store.set('readPage',readPage); showReadPage(); });
+const tick=()=>{ if(DEV_MODE&&DEV_SELFTEST) return;   // dev self-test holds the clock at 88:88
+  const d=new Date();clockTxt.textContent=d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');}; tick(); setInterval(tick,1000);
 setRpm(0); setDigits(0); unitTxt.textContent=useKmh?'km/h':'mph';
+// DEV placeholders (only with DEV_MODE / ?dev, until real data arrives): power-on SELF TEST look —
+// every bar full, every chip on, every number all 8s at its widest width. Unit labels still follow the toggles.
+function devPlaceholders(){
+  setRpm(RPM_MAX); setDigits(888); setKw('88.8');
+  setFill(FILL.power,1); setFill(FILL.regen,1); setBatt(1);
+  socTxt.textContent='888'; voltTxt.textContent='88.8'; ampTxt.textContent='888'; phaseTxt.textContent='888';
+  mtTxt.textContent=ctTxt.textContent='888'; mtU.textContent=ctU.textContent=useF?'°F':'°C'; layoutMt();
+  tripTxt.textContent='888.88'; tripU.textContent=useKmh?'km':'mi'; whTxt.textContent=rgnTxt.textContent='8888.8';
+  modeTxt.textContent='MODE-8'; clockTxt.textContent='88:88';
+  chipBT.show(true); chipRegen.show(true); chipFault.show(true);
+  warnTxt.textContent=FAULTS.reduce((a,b)=>b.length>a.length?b:a);                                // longest fault name
+}
+if(DEV_MODE&&DEV_SELFTEST) devPlaceholders();
 
 // ======================= BLE CONNECTION =======================
 let device, rx, pollTimer, busy=false, rxBuf=new Uint8Array(0), wakeLock=null;
@@ -430,6 +507,7 @@ function parse(){
 }
 function handle(p){
   const dv=new DataView(p.buffer,p.byteOffset,p.byteLength);
+  if(p[0]===CMD_GET_MCCONF || p[0]===CMD_GET_APPCONF){ DIAG.onReply(p); return; }
   if(p[0]===CMD_FW_VERSION){let n='',i=3;while(i<p.length&&p[i])n+=String.fromCharCode(p[i++]);fwTxt.textContent=n;}
   else if(p[0]===CMD_GET_VALUES){
     busy=false; let o=1;
@@ -437,6 +515,7 @@ function handle(p){
     render({tFet:i16(10),tMot:i16(10),iMot:i32(100),iIn:i32(100),id:i32(100),iq:i32(100),duty:i16(1000),erpm:i32(1),
             vin:i16(10),ah:i32(1e4),ahc:i32(1e4),wh:i32(1e4),whc:i32(1e4),tach:i32(1),tachAbs:i32(1),fault:p[o],
             mode:p.length>=75?p[p.length-1]:null});  // TruMoto extra byte: throttle switch position 1-3
+    DIAG.mode = p.length>=75 ? p[p.length-1] : null;
   }
 }
 async function poll(){ if(busy){busy=false;return;} busy=true; try{await rx.writeValue(PKT_VALUES);}catch(e){} }
@@ -465,8 +544,124 @@ function onDisconnected(){
   overlay.classList.remove('hidden'); ovmsg.textContent='Disconnected — tap to reconnect';
   try{wakeLock?.release();}catch{}
 }
-overlay.addEventListener('click',connect);
+if(DEV_MODE) overlay.classList.add('hidden');   // dev: no connect screen, UI is live without BLE
+else overlay.addEventListener('click',connect);
 chipBT.g.addEventListener('click',()=>device?.gatt?.connected&&device.gatt.disconnect());
+
+// ======================= DIAGNOSTICS PANEL =======================
+// Reads the motor config (0x4C) and app config (0x4F) once per tap, keeps a snapshot per throttle-switch mode,
+// and shows what differs between modes. Read-only: it never writes anything to the controller.
+const DIAG = (()=>{
+  const $=id=>document.getElementById(id);
+  const panel=$('diag'), out=$('dgOut'), status=$('dgStatus');
+  const snaps=[];                       // {mode, label, mc:Uint8Array, ap:Uint8Array, t}
+  let pending=null;                     // {cmd, resolve, timer}
+  // known motor-config fields (byte offset in the reply, counting the command byte as 0) — VESC 6.05 layout
+  const MC_FIELDS=[
+    {off:9,  name:'Motor current max',    unit:'A'},
+    {off:13, name:'Motor current min (brake)', unit:'A'},
+    {off:17, name:'Battery current max',  unit:'A'},
+    {off:21, name:'Battery current min (regen)', unit:'A'},
+  ];
+  const f32=(u8,o)=> o+4<=u8.length ? new DataView(u8.buffer,u8.byteOffset,u8.byteLength).getFloat32(o) : NaN;
+  const hex=(u8,a,b)=>Array.from(u8.slice(a,b),x=>x.toString(16).padStart(2,'0')).join(' ');
+  const modeLabel=m=> m==null ? '?' : (MODE_NAMES[m] ? 'MODE-'+MODE_NAMES[m] : 'mode '+m);
+  const setStatus=t=>status.textContent=t;
+
+  function request(cmd,pkt){
+    return new Promise((resolve,reject)=>{
+      if(!rx || !device?.gatt?.connected) return reject(new Error('not connected'));
+      pending={cmd,resolve,timer:setTimeout(()=>{pending=null;reject(new Error('no reply to 0x'+cmd.toString(16)));},3000)};
+      rx.writeValue(pkt).catch(e=>{clearTimeout(pending?.timer);pending=null;reject(e);});
+    });
+  }
+  function onReply(p){
+    if(pending && p[0]===pending.cmd){ clearTimeout(pending.timer); const r=pending.resolve; pending=null; r(p); }
+  }
+
+  async function read(){
+    try{
+      setStatus('Reading motor config…');  const mc=await request(CMD_GET_MCCONF,PKT_MCCONF);
+      setStatus('Reading app config…');    const ap=await request(CMD_GET_APPCONF,PKT_APPCONF);
+      const mode=api.mode, label=modeLabel(mode);
+      const i=snaps.findIndex(s=>s.mode===mode && mode!=null);
+      const snap={mode,label,mc,ap,t:new Date()};
+      if(i>=0) snaps[i]=snap; else snaps.push(snap);
+      setStatus(`Saved ${label} (motor ${mc.length} B, app ${ap.length} B). ${snaps.length} mode(s) captured — switch modes and read again.`);
+      draw();
+    }catch(e){ setStatus('Error: '+e.message); }
+  }
+
+  // byte ranges that differ between any snapshots (gaps of <=3 equal bytes are merged)
+  function diffRanges(key){
+    if(snaps.length<2) return [];
+    const n=Math.min(...snaps.map(s=>s[key].length)); const diff=[];
+    for(let i=0;i<n;i++) if(snaps.some(s=>s[key][i]!==snaps[0][key][i])) diff.push(i);
+    const rs=[]; for(const i of diff){ const r=rs[rs.length-1]; if(r && i-r.b<=3) r.b=i; else rs.push({a:i,b:i}); }
+    return rs;
+  }
+  // plausible float readings for a changed range (4-byte windows touching it)
+  function floatGuesses(key,r){
+    const out=[];
+    for(let o=r.a-3;o<=r.b;o++){ if(o<1) continue;
+      const vals=snaps.map(s=>f32(s[key],o));
+      if(vals.every(v=>Number.isFinite(v) && (v===0 || (Math.abs(v)>1e-4 && Math.abs(v)<1e6))) && new Set(vals.map(v=>v.toPrecision(6))).size>1)
+        out.push({o,vals});
+    }
+    return out;
+  }
+
+  function report(){
+    let t='Noisy Cricket per-mode config diagnostics\n'+(fwTxt.textContent||'')+'\n\n';
+    t+='Known motor-config fields\n';
+    t+='field'.padEnd(30)+snaps.map(s=>s.label.padStart(10)).join('')+'\n';
+    for(const f of MC_FIELDS) t+=f.name.padEnd(30)+snaps.map(s=>(f32(s.mc,f.off).toFixed(1)+f.unit).padStart(10)).join('')+'\n';
+    t+='Battery power max (≈ A × 76.6 V)'.padEnd(30)+snaps.map(s=>((f32(s.mc,17)*76.6/1000).toFixed(1)+'kW').padStart(10)).join('')+'\n';
+    for(const [key,name] of [['mc','MOTOR CONFIG (0x4C)'],['ap','APP CONFIG (0x4F)']]){
+      const rs=diffRanges(key);
+      t+=`\n${name}: `+(snaps.length<2 ? 'need 2+ modes to compare\n' : rs.length ? `${rs.length} changed range(s)\n` : 'IDENTICAL across modes\n');
+      for(const r of rs){
+        t+=`  bytes ${r.a}-${r.b}\n`;
+        for(const s of snaps) t+=`    ${s.label.padEnd(8)} ${hex(s[key],r.a,r.b+1)}\n`;
+        for(const g of floatGuesses(key,r)) t+=`    as float @${g.o}: `+g.vals.map(v=>+v.toPrecision(5)).join('  /  ')+'\n';
+      }
+    }
+    t+='\nRaw snapshots (hex)\n';
+    for(const s of snaps){ t+=`${s.label} motor: ${hex(s.mc,0,s.mc.length)}\n${s.label} app:   ${hex(s.ap,0,s.ap.length)}\n`; }
+    return t;
+  }
+
+  function draw(){
+    if(!snaps.length){ out.textContent='No snapshots yet.'; return; }
+    // summary table on top, full text report below
+    let h='<table><tr><th style="text-align:left">field</th>'+snaps.map(s=>`<th>${s.label}</th>`).join('')+'</tr>';
+    for(const f of MC_FIELDS) h+=`<tr><td style="text-align:left">${f.name}</td>`+snaps.map(s=>`<td>${f32(s.mc,f.off).toFixed(1)} ${f.unit}</td>`).join('')+'</tr>';
+    h+='</table>\n\n';
+    const esc=t=>t.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    out.innerHTML=h+esc(report());
+  }
+
+  async function copy(){
+    const t=report();
+    try{ await navigator.clipboard.writeText(t); setStatus('Report copied — paste it to Claude.'); }
+    catch{ // Bluefy may block the clipboard: select the text so it can be copied by hand
+      out.textContent=t; const r=document.createRange(); r.selectNodeContents(out);
+      const sel=getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      setStatus('Clipboard blocked — report text is selected, use Copy from the menu.'); }
+  }
+
+  const api={ mode:null, onReply, open(){ panel.classList.add('open'); draw(); }, close(){ panel.classList.remove('open'); } };
+  $('dgRead').onclick=read;
+  $('dgClear').onclick=()=>{ snaps.length=0; draw(); setStatus('Cleared.'); };
+  $('dgCopy').onclick=copy;
+  $('dgClose').onclick=api.close;
+  $('dgConnect').onclick=()=>{ if(device?.gatt?.connected){ setStatus('Already connected.'); return; } connect().then(()=>setStatus(device?.gatt?.connected?'Connected.':'Not connected.')); };
+  return api;
+})();
+// open the panel: long-press the clock (top right), or load the page with ?diag
+{ const hit=el('rect',{x:640,y:10,width:120,height:34,fill:'transparent'});
+  onPress(hit, ()=>DIAG.open(), null, 700); }
+if(new URLSearchParams(location.search).has('diag')) DIAG.open();
 </script>
 </body>
 </html>

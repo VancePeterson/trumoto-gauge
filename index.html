@@ -63,7 +63,7 @@ const POWER_MAX_KW = 14;      // power bar full   (~180 A x 76 V)
 const REGEN_MAX_KW = 4;       // regen bar full
 const BATT_EMPTY_PCT = 5;     // battery bar reads empty here (5% = 3.3 V/cell = 69.3 V on 21s)
 const MODE_NAMES  = {1:'C', 2:'B', 3:'A'};   // throttle switch position -> label
-const DEV_MODE    = true || new URLSearchParams(location.search).has('dev');   // true (or open with ?dev) = skip 'tap to connect' so the UI can be used in a desktop browser
+const DEV_MODE    = false || new URLSearchParams(location.search).has('dev');   // true (or open with ?dev) = skip 'tap to connect' so the UI can be used in a desktop browser
 const DEV_SELFTEST = false;  // dev only: true = power-on self-test look (all 8s, every bar full, every chip on); false = blank readouts
 
 // ======================= BLE / PROTOCOL =======================

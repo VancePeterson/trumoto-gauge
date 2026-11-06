@@ -72,9 +72,9 @@ function chip(x,y,label){const g=el('g',{});const w=label.length*10+14;
 
 // --- RPM bar ---
 txt(42,62,'×1000 r/min',{'font-size':12,class:'dim'});
-const ARC = {cx:152, cy:340, rx:110, ry:243};   // left sweep
+const ARC = {cx:215, cy:340, rx:175, ry:243};   // left sweep
 const LINE_END_X = 750, TOP_Y = ARC.cy-ARC.ry;  // 97
-const ARC_FRAC = 3000/RPM_MAX;                  // first 3000 rpm on the curve
+const ARC_FRAC = 4000/RPM_MAX;                  // first 4000 rpm on the curve
 function thick(u){return u<ARC_FRAC ? 14+26*(u/ARC_FRAC) : 40;}
 function pt(u){ // returns outer & inner points at bar position u (0..1)
   const th=thick(u);
@@ -104,7 +104,7 @@ function setRpm(rpm){
 }
 
 // --- speed: 7-segment digits ---
-const DIG={w:54,h:104,t:12}, SPEED_X=372, SPEED_Y=160;
+const DIG={w:54,h:104,t:12}, SPEED_X=352, SPEED_Y=158;
 const SEGMAP={0:'abcdef',1:'bc',2:'abged',3:'abgcd',4:'fgbc',5:'afgcd',6:'afgedc',7:'abc',8:'abcdefg',9:'abcdfg',' ':''};
 function segPoly(s){const {w,h,t}=DIG, m=h/2, e=t/2;
   const H=(y)=>[[e,y],[t,y-e],[w-t,y-e],[w-e,y],[w-t,y+e],[t,y+e]];
@@ -118,24 +118,25 @@ for(let d=0;d<3;d++){
 }
 function setDigits(n){
   const s=String(Math.max(0,Math.min(999,Math.round(n)))).padStart(3,' ');
-  digits.forEach((dg,i)=>{const on=SEGMAP[s[i]];for(const k in dg) dg[k].setAttribute('fill', on.includes(k)?'#ececec':'#141618');});
+  digits.forEach((dg,i)=>{const on=SEGMAP[s[i]];for(const k in dg) dg[k].setAttribute('fill', on.includes(k)?'#ececec':'#0d0e10');});
 }
 const unitTxt = txt(SPEED_X+3*(DIG.w+14)+2, SPEED_Y+DIG.h, '', {'font-size':20,class:'tap'});
 
 // --- power box (where the R1 shows gear) ---
-el('rect',{x:372,y:290,width:196,height:58,fill:'none',stroke:'#7d7d7d','stroke-width':1.5});
-txt(384,312,'POWER',{'font-size':12,class:'dim'});
-const kwTxt = txt(500,340,'0.0',{'text-anchor':'middle','font-size':46,class:'it'}); kwTxt.style.fill='#2ecc71';
-txt(560,340,'kW',{'text-anchor':'end','font-size':14,class:'dim'});
+el('rect',{x:352,y:290,width:196,height:58,fill:'none',stroke:'#7d7d7d','stroke-width':1.5});
+txt(364,312,'POWER',{'font-size':12,class:'dim'});
+const kwTxt = txt(480,340,'0.0',{'text-anchor':'middle','font-size':46,class:'it'}); kwTxt.style.fill='#2ecc71';
+txt(540,340,'kW',{'text-anchor':'end','font-size':14,class:'dim'});
 
 // --- left readouts (temps & volts) ---
 const readG=el('g',{class:'tap'});
+txt(104,240,'BATT',{'font-size':15},readG); const socTxt=txt(300,242,'--',{'text-anchor':'end','font-size':26,class:'it'},readG); txt(306,242,'%',{'font-size':14,class:'dim'},readG);
 txt(104,272,'VOLT',{'font-size':15},readG);   const voltTxt=txt(300,274,'--.-',{'text-anchor':'end','font-size':26,class:'it'},readG); txt(306,274,'V',{'font-size':14,class:'dim'},readG);
 txt(104,304,'M.TEMP',{'font-size':15},readG); const mtTxt=txt(300,306,'--',{'text-anchor':'end','font-size':26,class:'it'},readG);  const mtU=txt(306,306,'',{'font-size':14,class:'dim'},readG);
 txt(104,336,'C.TEMP',{'font-size':15},readG); const ctTxt=txt(300,338,'--',{'text-anchor':'end','font-size':26,class:'it'},readG);  const ctU=txt(306,338,'',{'font-size':14,class:'dim'},readG);
 
 // --- right ladder: battery level ---
-const LAD={x:640,y:150,h:198,n:10};
+const LAD={x:676,y:158,h:190,n:10};
 el('line',{x1:LAD.x,y1:LAD.y,x2:LAD.x,y2:LAD.y+LAD.h,stroke:'#cfcfcf','stroke-width':2});
 el('line',{x1:LAD.x+40,y1:LAD.y,x2:LAD.x+40,y2:LAD.y+LAD.h,stroke:'#cfcfcf','stroke-width':2});
 const ladderBars=[];
@@ -145,7 +146,7 @@ for(let k=0;k<LAD.n;k++){
   ladderBars.push(el('rect',{x:LAD.x+6,y,width:28,height:LAD.h/LAD.n-6}));
 }
 txt(LAD.x+50,LAD.y+12,'F',{'font-size':15,class:'dim'}); txt(LAD.x+50,LAD.y+LAD.h,'E',{'font-size':15,class:'dim'});
-const socTxt = txt(LAD.x+20,LAD.y-10,'--%',{'text-anchor':'middle','font-size':18,class:'it'});
+
 
 // --- bottom bar ---
 el('rect',{x:80,y:362,width:640,height:28,fill:'none',stroke:'#cfcfcf','stroke-width':1.5});
@@ -154,7 +155,7 @@ const tripTxt = txt(152,384,'0.00',{'font-size':19}); const tripU=txt(205,384,''
 txt(262,384,'AMP',{'font-size':15});  const ampTxt=txt(345,384,'0',{'text-anchor':'end','font-size':19});
 txt(380,384,'Wh',{'font-size':15});   const whTxt=txt(470,384,'0.0',{'text-anchor':'end','font-size':19});
 txt(500,384,'RGN',{'font-size':15});  const rgnTxt=txt(590,384,'0.0',{'text-anchor':'end','font-size':19});
-const fwTxt = txt(712,384,'',{'text-anchor':'end','font-size':12,class:'dim'});
+const fwTxt = txt(250,34,'',{'font-size':13,class:'dim'});
 
 // ======================= MATH =======================
 const POLE_PAIRS = MOTOR_POLES/2, WHEEL_CIRC = Math.PI*WHEEL_DIA_M;
@@ -181,7 +182,7 @@ function render(v){
   mtU.textContent = ctU.textContent = useF?'°F':'°C';
   // battery: smooth so it doesn't jump with voltage sag
   const s=soc(v.vin); socSmooth = socSmooth===null ? s : socSmooth + (s-socSmooth)*0.02;
-  socTxt.textContent = Math.round(socSmooth)+'%';
+  socTxt.textContent = Math.round(socSmooth);
   ladderBars.forEach((b,k)=>b.setAttribute('fill', k < Math.ceil(socSmooth/10) ? (socSmooth<20?'#ff3b30':'#4fc3f7') : '#1a1c1e'));
   // trip since connect
   if(tripStartTach===null) tripStartTach=v.tachAbs;
@@ -202,6 +203,7 @@ const FAULTS=['NONE','OVER VOLTAGE','UNDER VOLTAGE','DRV','ABS OVER CURRENT','FE
 unitTxt.addEventListener('click',e=>{e.stopPropagation();useKmh=!useKmh;store.set('kmh',useKmh);last&&render(last);});
 readG.addEventListener('click',e=>{e.stopPropagation();useF=!useF;store.set('degF',useF);last&&render(last);});
 setInterval(()=>{const d=new Date();clockTxt.textContent=d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');},1000);
+const tick=()=>{const d=new Date();clockTxt.textContent=d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');}; tick();
 setRpm(0); setDigits(0); unitTxt.textContent=useKmh?'km/h':'mph';
 
 // ======================= BLE CONNECTION =======================

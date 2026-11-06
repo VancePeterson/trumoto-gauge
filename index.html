@@ -11,7 +11,7 @@
   svg { width:100vw; height:100vh; display:block; }
   text { font-family:"Avenir Next Condensed","Helvetica Neue",Arial,sans-serif; font-weight:700; fill:#e8e8e8; }
   .it { font-style:italic; }
-  .dim { fill:#9a9a9a; }
+  .dim { fill:#85888c; }
   .tap { cursor:pointer; }
   #overlay { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
              background:rgba(0,0,0,.72); color:#e8e8e8; font:700 22px "Avenir Next Condensed",sans-serif; letter-spacing:.08em; }
@@ -29,10 +29,13 @@ const MOTOR_POLES = 8;        // 8 poles = 4 pole pairs  -> motor RPM = eRPM / 4
 const GEAR_RATIO  = 6.077;    // motor : wheel
 const WHEEL_DIA_M = 0.405;    // metres
 const CELLS       = 21;       // 21s pack
-const RPM_MAX     = 9000;     // end of RPM bar (motor RPM)
-const RPM_RED     = 8000;     // start of red zone
+const RPM_MAX     = 10000;    // end of RPM bar (motor RPM); motor max is ~9,500 unloaded
+const RPM_RED     = 9000;     // start of red zone
 const WARN_FET_C  = 80, WARN_MOTOR_C = 100;  // warning thresholds
 const POLL_MS     = 100;
+const POWER_MAX_KW = 14;      // power bar full   (~180 A x 76 V)
+const REGEN_MAX_KW = 4;       // regen bar full
+const BATT_EMPTY_PCT = 5;     // battery bar reads empty here (5% = 3.3 V/cell = 69.3 V on 21s)
 const MODE_NAMES  = {1:'C', 2:'B', 3:'A'};   // throttle switch position -> label
 
 // ======================= BLE / PROTOCOL =======================
@@ -61,73 +64,171 @@ function txt(x,y,s,attrs={},parent=svg){const t=el('text',{x,y,...attrs},parent)
 el('rect',{x:6,y:4,width:788,height:412,rx:18,fill:'#050607',stroke:'#1c1f22','stroke-width':3});
 
 // --- top status bar ---
-el('rect',{x:40,y:14,width:720,height:28,fill:'none',stroke:'#cfcfcf','stroke-width':1.5});
-const chipBT = chip(48,18,'BT'), chipRegen = chip(96,18,'REGEN'), chipFault = chip(170,18,'FAULT');
+el('rect',{x:40,y:10,width:720,height:34,fill:'none',stroke:'#85888c','stroke-width':1.5});
+const chipBT = chip(48,14,'BT'), chipRegen = chip(100,14,'REGEN'), chipFault = chip(184,14,'FAULT');
 chipFault.box.setAttribute('fill','#d32f2f'); chipFault.label.setAttribute('fill','#fff');
-const warnTxt = txt(470,36,'',{'text-anchor':'middle','font-size':17,fill:'#e53935'}); warnTxt.style.fill='#e53935';
-const clockTxt = txt(750,36,'--:--',{'text-anchor':'end','font-size':20});
-function chip(x,y,label){const g=el('g',{});const w=label.length*10+14;
-  const box=el('rect',{x,y,width:w,height:20,fill:'#e8e8e8'},g);
-  const t=txt(x+w/2,y+16,label,{'text-anchor':'middle','font-size':15},g); t.style.fill='#000';
+const warnTxt = txt(470,35,'',{'text-anchor':'middle','font-size':20,fill:'#e53935'}); warnTxt.style.fill='#e53935';
+const clockTxt = txt(750,36,'--:--',{'text-anchor':'end','font-size':24});
+function chip(x,y,label){const g=el('g',{});const w=label.length*12+16;
+  const box=el('rect',{x,y,width:w,height:26,fill:'#e8e8e8'},g);
+  const t=txt(x+w/2,y+20,label,{'text-anchor':'middle','font-size':18},g); t.style.fill='#000';
   g.style.display='none'; return {g,box,label:t,show(v){g.style.display=v?'':'none';}};}
 
-// --- RPM bar ---
-txt(42,62,'×1000 r/min',{'font-size':12,class:'dim'});
-const ARC = {cx:215, cy:340, rx:175, ry:243};   // left sweep
-const LINE_END_X = 750, TOP_Y = ARC.cy-ARC.ry;  // 97
-const ARC_FRAC = 4000/RPM_MAX;                  // first 4000 rpm on the curve
-function thick(u){return u<ARC_FRAC ? 14+26*(u/ARC_FRAC) : 40;}
-function pt(u){ // returns outer & inner points at bar position u (0..1)
-  const th=thick(u);
-  if(u<=ARC_FRAC){const a=Math.PI+(u/ARC_FRAC)*Math.PI/2, c=Math.cos(a), s=Math.sin(a);
-    return {o:[ARC.cx+ARC.rx*c, ARC.cy+ARC.ry*s], i:[ARC.cx+(ARC.rx-th)*c, ARC.cy+(ARC.ry-th)*s], n:[c,s]};}
-  const x=ARC.cx+(u-ARC_FRAC)/(1-ARC_FRAC)*(LINE_END_X-ARC.cx);
-  return {o:[x,TOP_Y], i:[x,TOP_Y+th], n:[0,-1]};
+// --- RPM bar (R1 style) ---
+txt(42,64,'×1000 r/min',{'font-size':17});
+// One continuous sweep across x = TX0..TX1. Segments are cut with vertical sides.
+// Top edge drops gently on the left; bottom edge sweeps up strongly, so the left strips are tall and the right blocks short.
+const TX0=40, TX1=760, TW=TX1-TX0;   // tach spans the same width as the top/bottom banners
+const yTopAt = x => { const s=(x-TX0)/TW; return  72 +  89*Math.exp(-s/0.12); };   // right end raised (was 97); left end unchanged at 161
+const yBotRef = x => { const s=(x-TX0)/TW; return 106 + 147*Math.exp(-s/0.17); };
+const TACH_H = yBotRef(TX1) - yTopAt(TX1) + 6;         // bar height: right-most bar standard (~34) + 6
+const yBotAt = x => yTopAt(x) + TACH_H;                // every bar the same height all the way across
+// rpm -> x: low numbers bunched on the sweep (R1 spacing for 0-5k), then evenly spaced across the flat top
+const RPM_T = [[0,0],[1000,.015],[2000,.05],[3000,.083],[4000,.13],[5000,.19]];
+function xAt(rpm){
+  rpm=Math.max(0,Math.min(RPM_MAX,rpm));
+  for(let i=1;i<RPM_T.length;i++){ const [r1,t1]=RPM_T[i],[r0,t0]=RPM_T[i-1];
+    if(rpm<=r1) return TX0+TW*(t0+(t1-t0)*(rpm-r0)/(r1-r0)); }
+  const [rL,tL]=RPM_T[RPM_T.length-1];
+  return TX0+TW*(tL+(1-tL)*(rpm-rL)/(RPM_MAX-rL));
 }
-const SEG_RPM = 250, NSEG = RPM_MAX/SEG_RPM, segs=[];
-for(let k=0;k<NSEG;k++){
-  const u0=k/NSEG, u1=(k+1)/NSEG, gap=0.0028;
-  const a=pt(u0+gap), b=pt(u1-gap);
-  const red = k*SEG_RPM >= RPM_RED;
-  const p=el('polygon',{points:[a.o,b.o,b.i,a.i].map(q=>q.join(',')).join(' ')});
-  segs.push({p, red});
+function rpmAt(x){ let lo=0,hi=RPM_MAX; for(let i=0;i<30;i++){const m=(lo+hi)/2; if(xAt(m)<x) lo=m; else hi=m;} return lo; }
+// segment layout (explicit widths, left to right):
+//   bars 1-5  : narrow strips on the sweep (as tuned)
+//   bars 6-10 : double-width blocks (2 x a standard top block)
+//   the rest  : standard top blocks filling out to the end; the last 4 are the red zone
+const SEG_GAP=2.2, segBounds=[];
+const FIRST_BAR_EXTRA = 28;   // extra bar height at the far left, tapering to 0 at the far right
+const BLOCK_W = (TX1 - xAt(5000)) / 20;               // standard top block width (as it was)
+{ const W1 = 0.6*(xAt(5000)-TX0)/7.85;               // bar 1 width (unchanged)
+  const W7 = 2*BLOCK_W;                                // bar 7 width (double block)
+  const widths = [];
+  for(let k=0;k<6;k++) widths.push(W1*Math.pow(W7/W1, k/6));   // bars 1-6 grow smoothly toward bar 7
+  for(let k=0;k<4;k++) widths.push(W7);                // bars 7-10
+  // bars 11-18 shrink smoothly from bar 10's width down to bar 19's; bars 19-22 (red zone) are equal.
+  // Bar 19's width E is solved so everything fits exactly to the end of the tach.
+  const used = widths.reduce((a,b)=>a+b,0), room = TW-used;
+  const tailWidths = E => { const w=[]; for(let k=1;k<=8;k++) w.push(W7*Math.pow(E/W7,k/9)); for(let k=0;k<4;k++) w.push(E); return w; };
+  let lo=1, hi=W7; for(let i=0;i<50;i++){ const m=(lo+hi)/2, tot=tailWidths(m).reduce((a,b)=>a+b,0); if(tot>room) hi=m; else lo=m; }
+  widths.push(...tailWidths(lo));
+  let xx=TX0; for(const w of widths){ segBounds.push(xx); xx+=w; } segBounds.push(TX1);
 }
+const RED_SEGS = 4;                                    // last 4 blocks are red
+const segs=[];
+for(let k=0;k<segBounds.length-1;k++){
+  const xa=segBounds[k]+SEG_GAP/2, xb=segBounds[k+1]-SEG_GAP/2;
+  // follow the curves along the top and bottom edges (sampled every ~1.5 units) so wide blocks stay smooth
+  const nS=Math.max(2,Math.ceil((xb-xa)/1.5)), pts=[];
+  for(let i=0;i<=nS;i++){ const x=xa+(xb-xa)*i/nS; pts.push([x,yTopAt(x)]); }
+  // extra bar height tapers smoothly from FIRST_BAR_EXTRA at the left end to 0 by the start of the 10th bar
+  const tEnd = segBounds[9];   // start of the 10th bar
+  for(let i=nS;i>=0;i--){ const x=xa+(xb-xa)*i/nS; const u=Math.min(1,(x-TX0)/(tEnd-TX0)); pts.push([x,yBotAt(x)+FIRST_BAR_EXTRA*(1-u)*(1-u)]); }   // eases out to 0 (no kink at the end) without bulging on the left
+  const p=el('polygon',{points:pts.map(q=>q.map(v=>v.toFixed(1)).join(',')).join(' ')});
+  segs.push({p, rpm:rpmAt(segBounds[k]), red: k >= segBounds.length-1-RED_SEGS});
+}
+// numbers sit just above the top edge, pushed out along its normal
 for(let r=1000;r<=RPM_MAX;r+=1000){
-  const q=pt(r/RPM_MAX), off=14;
-  const x=q.o[0]+q.n[0]*off, y=q.o[1]+q.n[1]*off+6;
-  const t=txt(x,y,String(r/1000),{'text-anchor':'middle','font-size':r/RPM_MAX<ARC_FRAC?17:20,class:'it'});
-  if(r>RPM_RED) t.style.fill='#e53935';
+  const END=segBounds.length-1;   // 4..10 sit on block gaps, two blocks apart, counted back from the end
+  const LABEL_GAP = {4000:END-14, 5000:END-12, 6000:END-10, 7000:END-8, 8000:END-6, 9000:END-4, 10000:END-2};
+  const LABEL_X = {1000: segBounds[2], 2000: segBounds[4], 3000: segBounds[6]};   // labels pinned to gaps between strips: 1 (2nd|3rd), 2 (4th|5th), 3 (6th|7th)
+  const x=LABEL_X[r] ?? segBounds[LABEL_GAP[r]], y=yTopAt(x),
+ dy=(yTopAt(x+1)-yTopAt(x-1))/2, n=Math.hypot(1,dy);
+  const LABEL_OFF=9;                       // distance of numbers from the tach edge
+  const ox=dy/n*LABEL_OFF, oy=-1/n*LABEL_OFF;   // along the normal pointing up / up-left
+  const small = x < xAt(5000)-1;   // smaller labels only on the sweep
+  const t=txt(x+ox, y+oy+(small?2:6), String(r/1000),{'text-anchor':'middle','font-size':20,class:'it'});
+  t.style.fontWeight='900';   // bold tach numbers
+  if(r>=RPM_RED) t.style.fill='#e53935';
 }
 function setRpm(rpm){
-  const lit=rpm/SEG_RPM;
-  segs.forEach((s,k)=>{const on=k<lit;
+  segs.forEach(s=>{const on = rpm > s.rpm + 1;
     s.p.setAttribute('fill', s.red ? (on?'#ff3b30':'#b71c1c') : (on?'#ececec':'#2b2d30'));});
 }
 
-// --- speed: 7-segment digits ---
-const DIG={w:54,h:104,t:12}, SPEED_X=352, SPEED_Y=158;
-const SEGMAP={0:'abcdef',1:'bc',2:'abged',3:'abgcd',4:'fgbc',5:'afgcd',6:'afgedc',7:'abc',8:'abcdefg',9:'abcdfg',' ':''};
-function segPoly(s){const {w,h,t}=DIG, m=h/2, e=t/2;
-  const H=(y)=>[[e,y],[t,y-e],[w-t,y-e],[w-e,y],[w-t,y+e],[t,y+e]];
-  const V=(x,y0,y1)=>[[x,y0+e],[x+e,y0+t],[x+e,y1-t],[x,y1-e],[x-e,y1-t],[x-e,y0+t]];
-  return {a:H(e),g:H(m),d:H(h-e),f:V(e,0,m),e:V(e,m,h),b:V(w-e,0,m),c:V(w-e,m,h)}[s];}
+// --- speed: R1-style digits — continuous stroke, upright, generously rounded corners ---
+// rc = corner radius on the stroke's centre line: outer corners round off at rc + t/2, inner at rc - t/2
+const DIG={w:82,h:92,t:13.5,rc:10,gap:12}, SPEED_X=282, SPEED_Y=168;
+function roundedPolyline(pts, closed, r=DIG.rc){
+  const n=pts.length, P=i=>pts[(i+n)%n];
+  const cut=(a,b,d)=>{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1,k=Math.min(d,L/2)/L;return [a[0]+dx*k,a[1]+dy*k];};
+  let d='';
+  if(closed){
+    const s0=cut(P(0),P(1),r); d+=`M${s0[0]},${s0[1]}`;
+    for(let i=1;i<=n;i++){ const v=P(i), a=cut(v,P(i-1),r), b=cut(v,P(i+1),r); d+=` L${a[0]},${a[1]} Q${v[0]},${v[1]} ${b[0]},${b[1]}`; }
+    return d+' Z';
+  }
+  d+=`M${pts[0][0]},${pts[0][1]}`;
+  for(let i=1;i<n-1;i++){ const v=pts[i], a=cut(v,pts[i-1],r), b=cut(v,pts[i+1],r); d+=` L${a[0]},${a[1]} Q${v[0]},${v[1]} ${b[0]},${b[1]}`; }
+  return d+` L${pts[n-1][0]},${pts[n-1][1]}`;
+}
+const ONE_FLAG = 0.19;   // length of the 1's top flag, as a fraction of digit width
+function digitPath(ch, D=DIG){
+  const c=D.t/2, L=c, R=D.w-c, T=c, B=D.h-c, M=D.h/2;
+  // open strokes: push both loose ends out by half a stroke so they reach the digit's edge like the rest
+  const ext=(a,b)=>{const dx=a[0]-b[0],dy=a[1]-b[1],L=Math.hypot(dx,dy)||1;return [a[0]+dx/L*c,a[1]+dy/L*c];};
+  const o=(...p)=>{ p=p.map(q=>q.slice()); p[0]=ext(p[0],p[1]); p[p.length-1]=ext(p[p.length-1],p[p.length-2]); return roundedPolyline(p,false,D.rc); };
+  const z=(...p)=>roundedPolyline(p,true,D.rc);
+  return ({
+    '0': z([L,T],[R,T],[R,B],[L,B]),
+    '1': o([R-ONE_FLAG*D.w,T],[R,T],[R,B]),            // flag scales with digit width
+    '2': o([L,T],[R,T],[R,M],[L,M],[L,B],[R,B]),
+    '3': o([L,T],[R,T],[R,B],[L,B]) + ' ' + o([L+0.16*D.w,M],[R,M]),   // middle bar inset scales too
+    '4': o([L,T],[L,M],[R,M]) + ' ' + o([R,T],[R,B]),
+    '5': o([R,T],[L,T],[L,M],[R,M],[R,B],[L,B]),
+    '6': o([R,T],[L,T],[L,B],[R,B],[R,M],[L,M]),
+    '7': o([L,T],[R,T],[R,B]),
+    '8': z([L,T],[R,T],[R,B],[L,B]) + ' ' + o([L,M],[R,M]),
+    '9': o([R,M],[L,M],[L,T],[R,T],[R,B],[L,B]),
+    ' ': '',
+  })[ch];
+}
 const digits=[];
 for(let d=0;d<3;d++){
-  const g=el('g',{transform:`translate(${SPEED_X+d*(DIG.w+14)},${SPEED_Y}) skewX(-7)`});
-  const segsD={}; for(const s of 'abcdefg') segsD[s]=el('polygon',{points:segPoly(s).map(q=>q.join(',')).join(' ')},g);
-  digits.push(segsD);
+  const g=el('g',{transform:`translate(${SPEED_X+d*(DIG.w+DIG.gap)},${SPEED_Y})`});
+  digits.push(el('path',{d:'',fill:'none',stroke:'#ececec','stroke-width':DIG.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g));
 }
 function setDigits(n){
   const s=String(Math.max(0,Math.min(999,Math.round(n)))).padStart(3,' ');
-  digits.forEach((dg,i)=>{const on=SEGMAP[s[i]];for(const k in dg) dg[k].setAttribute('fill', on.includes(k)?'#ececec':'#0d0e10');});
+  digits.forEach((p,i)=>p.setAttribute('d',digitPath(s[i])));
 }
-const unitTxt = txt(SPEED_X+3*(DIG.w+14)+2, SPEED_Y+DIG.h, '', {'font-size':20,class:'tap'});
+const unitTxt = txt(SPEED_X+3*(DIG.w+DIG.gap)+2, SPEED_Y+DIG.h, '', {'font-size':24,class:'tap'});
+unitTxt.style.fill='#85888c'; unitTxt.style.fontWeight='500';   // grey, lighter weight
 
 // --- power box (where the R1 shows gear) ---
-el('rect',{x:352,y:290,width:196,height:58,fill:'none',stroke:'#7d7d7d','stroke-width':1.5});
-txt(364,312,'POWER',{'font-size':12,class:'dim'});
-const kwTxt = txt(480,340,'0.0',{'text-anchor':'middle','font-size':46,class:'it'}); kwTxt.style.fill='#2ecc71';
-txt(540,340,'kW',{'text-anchor':'end','font-size':14,class:'dim'});
+const PB={dx:22, dy:-22};   // power box offset (moved up/right to sit just under the speed)
+const pbG=el('g',{});      // shifted at startup so its right edge lands just past the 'h' of 'mph'
+el('rect',{x:352+PB.dx,y:290+PB.dy,width:196,height:92,fill:'none',stroke:'#85888c','stroke-width':1.5},pbG);   // bottom edge just above the bottom banner
+const pwrLbl=txt(362+PB.dx,314+PB.dy,'Power',{'font-size':20,class:'dim'},pbG); pwrLbl.style.fontWeight='600';   // same size as 'mph', slightly heavier
+// kW value drawn with the speed's digit style, scaled to the old text size (right-aligned at the same spot)
+const KW_H = 44;   // digit height in the Power box
+const KW_DIG = {h:KW_H, w:KW_H*DIG.w/DIG.h, t:KW_H*DIG.t/DIG.h, rc:KW_H*DIG.rc/DIG.h, gap:5};
+const kwG = el('g',{},pbG), KW_RIGHT = 504+PB.dx, KW_BASE = 373+PB.dy;   // bottom-aligned with 'kW'
+function setKw(str){
+  kwG.innerHTML=''; const D=KW_DIG, dotW=D.t*1.6; let x=KW_RIGHT;
+  for(const ch of [...str].reverse()){
+    if(ch==='.'){ x-=dotW; el('rect',{x:x+(dotW-D.t)/2,y:KW_BASE-D.t,width:D.t,height:D.t,rx:D.t*0.25,fill:'#2ecc71'},kwG); x-=D.gap*0.4; continue; }
+    const adv = ch==='1' ? ONE_FLAG*D.w + D.t : D.w;          // '1' takes only the space it needs here (no LCD gap)
+    x-=adv; const g=el('g',{transform:`translate(${(x-(D.w-adv)).toFixed(1)},${KW_BASE-D.h})`},kwG);
+    const d = ch==='-' ? `M${D.t/2},${D.h/2} H${D.w-D.t/2}` : digitPath(ch,D);
+    if(d) el('path',{d,fill:'none',stroke:'#2ecc71','stroke-width':D.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g);
+    x-=D.gap;
+  }
+}
+setKw('0.0');
+// battery icon: solid white vertical battery with a see-through lightning bolt (moves with the Power box)
+{ const w=16, h=30, r=3, nubW=7, nubH=3.5, bx=352+PB.dx+196+9, byBot=290+PB.dy+92-5;   // 5 up from the box bottom
+  const bi=el('g',{transform:`translate(${bx},${byBot-h})`},pbG);
+  const body=`M${r},0 H${w-r} Q${w},0 ${w},${r} V${h-r} Q${w},${h} ${w-r},${h} H${r} Q0,${h} 0,${h-r} V${r} Q0,0 ${r},0 Z`;
+  const bolt=`M${w*0.62},${h*0.13} L${w*0.24},${h*0.57} H${w*0.5} L${w*0.4},${h*0.89} L${w*0.78},${h*0.43} H${w*0.52} L${w*0.69},${h*0.13} Z`;
+  el('path',{d:body+' '+bolt,'fill-rule':'evenodd',fill:'#ececec'},bi);                         // bolt is cut out (clear)
+  el('rect',{x:(w-nubW)/2,y:-nubH,width:nubW,height:nubH+0.5,rx:1,fill:'#ececec'},bi);           // terminal
+}
+txt(540+PB.dx,373+PB.dy,'kW',{'text-anchor':'end','font-size':14,class:'dim'},pbG);
+// line the power box's right edge up just past the end of 'mph'
+{ const keep=unitTxt.textContent; unitTxt.textContent='mph';
+  try{ const bb=unitTxt.getBBox(), right=bb.x+bb.width+7, boxRight=352+PB.dx+196;
+       pbG.setAttribute('transform',`translate(${(right-boxRight).toFixed(1)},0)`); }catch{}
+  unitTxt.textContent=keep; }
 
 // --- left readouts (temps & volts) ---
 const readG=el('g',{class:'tap'});
@@ -136,27 +237,127 @@ txt(104,272,'VOLT',{'font-size':15},readG);   const voltTxt=txt(300,274,'--.-',{
 txt(104,304,'M.TEMP',{'font-size':15},readG); const mtTxt=txt(300,306,'--',{'text-anchor':'end','font-size':26,class:'it'},readG);  const mtU=txt(306,306,'',{'font-size':14,class:'dim'},readG);
 txt(104,336,'C.TEMP',{'font-size':15},readG); const ctTxt=txt(300,338,'--',{'text-anchor':'end','font-size':26,class:'it'},readG);  const ctU=txt(306,338,'',{'font-size':14,class:'dim'},readG);
 
-// --- right ladder: battery level ---
-const LAD={x:676,y:158,h:190,n:10};
-el('line',{x1:LAD.x,y1:LAD.y,x2:LAD.x,y2:LAD.y+LAD.h,stroke:'#cfcfcf','stroke-width':2});
-el('line',{x1:LAD.x+40,y1:LAD.y,x2:LAD.x+40,y2:LAD.y+LAD.h,stroke:'#cfcfcf','stroke-width':2});
-const ladderBars=[];
-for(let k=0;k<LAD.n;k++){
-  const y=LAD.y+LAD.h-(k+1)*(LAD.h/LAD.n)+3;
-  el('line',{x1:LAD.x-34,y1:y+LAD.h/LAD.n-3,x2:LAD.x-8,y2:y+LAD.h/LAD.n-3,stroke:'#cfcfcf','stroke-width':2});
-  ladderBars.push(el('rect',{x:LAD.x+6,y,width:28,height:LAD.h/LAD.n-6}));
+// --- right side, R1 style: two back-to-back brackets ---
+const RS={top:152, bot:352, spineL:688, spineR:701, arm:34};   // spines 13 apart = 8-unit clear gap (matches R_GAP)
+const RS_W_ORIG = 3;            // original line thickness (noted for later)
+const RS_W = 5, RS_COL = '#85888c';  // bracket line thickness / light grey
+const gL=el('g',{});
+// left bracket: open to the left, tapers wide (top) to narrow (bottom); 4 ticks follow the taper
+const TICK_GAP=7;   // inner ticks sit this far left of the spine
+const L_TOP=RS.arm*1.8, L_BOT=RS.arm*0.75;
+const lWidth = y => L_TOP + (L_BOT-L_TOP)*(y-RS.top)/(RS.bot-RS.top);
+el('path',{d:`M${RS.spineL-L_TOP-7},${RS.top} H${RS.spineL} V${RS.bot} H${RS.spineL-L_BOT}`,fill:'none',stroke:RS_COL,'stroke-width':RS_W},gL);
+// 5 inner ticks, evenly spaced: top one a tick-width below the top line, bottom one a tick-width above the bottom line
+const TICK_Y0 = RS.top + RS_W/2 + RS_W_ORIG + RS_W_ORIG/2;
+const TICK_Y4 = RS.bot - RS_W/2 - RS_W_ORIG - RS_W_ORIG/2;
+for(let k=0;k<5;k++){
+  const y = TICK_Y0 + k*(TICK_Y4-TICK_Y0)/4 + (k===0 ? RS_W_ORIG : 0);   // top tick nudged one more tick-width down
+  // top tick starts inside the top line's left end, bottom tick slightly inside the bottom line's;
+  // the middle three step down evenly in length between them
+  const x2 = RS.spineL-TICK_GAP;
+  const lenTop = x2-(RS.spineL-L_TOP+TICK_GAP), lenBot = x2-(RS.spineL-L_BOT);   // bottom tick's left edge flush with the bottom grey line's left edge
+  const x1 = x2 - (lenTop + (lenBot-lenTop)*k/4);
+  el('line',{x1,y1:y,x2,y2:y,stroke:'#e8e8e8','stroke-width':RS_W_ORIG},gL);
 }
-txt(LAD.x+50,LAD.y+12,'F',{'font-size':15,class:'dim'}); txt(LAD.x+50,LAD.y+LAD.h,'E',{'font-size':15,class:'dim'});
+// right bracket: exact mirror of the left one, flipped about the gap between the spines
+const MIRROR_X = RS.spineL + RS.spineR;   // = 2 x centre line
+const gR = gL.cloneNode(true);
+gR.setAttribute('transform',`translate(${MIRROR_X},0) scale(-1,1)`);
+svg.appendChild(gR);
+// right side becomes two separate bars, split in the middle by two short grey lines with a small gap.
+// (drawn in the left bracket's coordinates; gR's transform mirrors them)
+const R_MID = (RS.top+RS.bot)/2, R_GAP = 8;                 // gap between the two middle lines
+const yUpper = R_MID - R_GAP/2 - RS_W/2, yLower = R_MID + R_GAP/2 + RS_W/2;
+const R_LONG = RS.spineL-L_TOP-7;
+const R_MID_EXTRA = 4;   // middle grey lines slightly longer than the left bar's bottom line
+gR.querySelector('path').setAttribute('d',
+  `M${R_LONG},${RS.top} H${RS.spineL} V${yUpper} H${RS.spineL-L_BOT-R_MID_EXTRA} `+      // upper bar
+  `M${RS.spineL-L_BOT-R_MID_EXTRA},${yLower} H${RS.spineL} V${RS.bot} H${R_LONG}`);      // lower bar
+gR.querySelectorAll('line').forEach(l=>l.remove());   // replace mirrored ticks with per-bar ticks
+// fills BEHIND the white ticks: upper bar = regen (green, grows UP from the middle),
+// lower bar = power (blue, grows DOWN from the middle). Each fill is tapered like the ticks:
+// slightly wider than the shortest tick at the middle, widening on the same sweep toward the outer end.
+const FILL = (()=>{
+  const xIn  = RS.spineL - RS_W/2;                         // inner edge of the spine (left-bracket coords; gR mirrors)
+  const x2   = RS.spineL - TICK_GAP;                       // where the ticks end next to the spine
+  const LONG = x2 - (RS.spineL - L_TOP + TICK_GAP), SHORT = x2 - (RS.spineL - L_BOT);
+  const EXTRA = 4, EXTRA_MAX = 5;                          // overhang past the ticks: 4 at the middle, 4+5 at the max end
+  const tw = RS_W/2 + RS_W_ORIG + RS_W_ORIG/2;
+  const mk = (yMid, yEnd, yInnerTick, yOuterTick, col) => {
+    const p = el('path',{d:'',fill:col},gR);
+    const widthAt = y => { const t=Math.max(0,Math.min(1,(y-yInnerTick)/(yOuterTick-yInnerTick)));
+                           return SHORT + (LONG-SHORT)*t*t + EXTRA + EXTRA_MAX*t; };   // same sweep as the ticks; overhang grows toward the max end
+    return {p, yMid, yEnd, widthAt};
+  };
+  // vertical span: from the innermost white tick to the outermost white tick (covering their full thickness),
+  // horizontal: right edge where the ticks end (x2), never touching the grey spine / top / bottom / middle lines
+  const h = RS_W_ORIG/2;
+  const rIn = yUpper-tw-RS_W_ORIG, rOut = RS.top+tw+RS_W_ORIG;      // regen: innermost / outermost tick
+  const pIn = yLower+tw+RS_W_ORIG, pOut = RS.bot-tw-RS_W_ORIG;      // power: innermost / outermost tick
+  return {
+    regen: mk(rIn+h, rOut-h, rIn, rOut, '#2ecc71'),
+    power: mk(pIn-h, pOut+h, pIn, pOut, '#1e88e5'),
+    xIn: x2, x2,
+  };
+})();
+function setFill(f, frac){
+  frac=Math.max(0,Math.min(1,frac));
+  if(frac<0.005){ f.p.setAttribute('d',''); return; }
+  const yTo = f.yMid + (f.yEnd-f.yMid)*frac, N=24, pts=[];
+  for(let i=0;i<=N;i++){ const y=f.yMid+(yTo-f.yMid)*i/N; pts.push([FILL.x2 - f.widthAt(y), y]); }
+  const d = `M${FILL.xIn},${f.yMid} ` + pts.map(([x,y])=>`L${x.toFixed(1)},${y.toFixed(1)}`).join(' ') + ` L${FILL.xIn},${yTo} Z`;
+  f.p.setAttribute('d', d);
+}
+// battery fill on the LEFT bar: light blue, behind the white ticks, grows from the bottom tick up to the top tick,
+// tapered to follow the ticks (narrow at the bottom, wide at the top) with the same small overhang as the right fills
+const BATT = (()=>{
+  const x2 = RS.spineL - TICK_GAP;                                    // where the ticks end next to the spine
+  const lenTop = x2-(RS.spineL-L_TOP+TICK_GAP), lenBot = x2-(RS.spineL-L_BOT);
+  const yTopTick = TICK_Y0 + RS_W_ORIG, yBotTick = TICK_Y4, h = RS_W_ORIG/2;
+  const p = el('path',{d:'',fill:'#318193'});   // battery blue
+  gL.insertBefore(p, gL.querySelector('line'));                       // behind the ticks
+  const widthAt = y => { const t=Math.max(0,Math.min(1,(yBotTick-y)/(yBotTick-yTopTick)));   // 0 bottom .. 1 top
+                         const tc = 0.55*t + 0.45*t*t;                   // gentle curve instead of a straight taper
+                         return lenBot + (lenTop-lenBot)*tc + 4 + 5*t; };
+  return {p, x2, yStart:yBotTick+h, yEnd:yTopTick-h, widthAt};
+})();
+function setBatt(frac){
+  frac=Math.max(0,Math.min(1,frac));
+  if(frac<0.005){ BATT.p.setAttribute('d',''); return; }
+  const yTo = BATT.yStart + (BATT.yEnd-BATT.yStart)*frac, N=24, pts=[];
+  for(let i=0;i<=N;i++){ const y=BATT.yStart+(yTo-BATT.yStart)*i/N; pts.push([BATT.x2-BATT.widthAt(y), y]); }
+  BATT.p.setAttribute('d', `M${BATT.x2},${BATT.yStart} `+pts.map(([x,y])=>`L${x.toFixed(1)},${y.toFixed(1)}`).join(' ')+` L${BATT.x2},${yTo} Z`);
+}
+// 5 white ticks inside each right bar: longest at the outer end (top / bottom), shortest next to the middle
+{
+  const x2 = RS.spineL-TICK_GAP;
+  const LEN_LONG  = x2-(RS.spineL-L_TOP+TICK_GAP);   // same as the left bar's top tick
+  const LEN_SHORT = x2-(RS.spineL-L_BOT);            // same as the left bar's bottom tick
+  const tw = RS_W/2 + RS_W_ORIG + RS_W_ORIG/2;       // one tick-width clear of a grey line
+  const bars = [
+    {yOuter: RS.top + tw + RS_W_ORIG, yInner: yUpper - tw},   // upper bar (outer = top)
+    {yOuter: RS.bot - tw - RS_W_ORIG, yInner: yLower + tw},   // lower bar (outer = bottom)
+  ];
+  for(const b of bars) for(let k=0;k<5;k++){
+    const y = b.yOuter + k*(b.yInner-b.yOuter)/4
+            + (k===4 ? Math.sign(b.yOuter-b.yInner)*RS_W_ORIG : 0);   // innermost tick nudged one more tick-width away from the middle grey line
+    const t = 1 - k/4;                                   // 1 at the outer tick, 0 at the innermost
+    const len = LEN_SHORT + (LEN_LONG-LEN_SHORT)*t*t;    // curved sweep instead of a straight taper
+    el('line',{x1:x2-len,y1:y,x2,y2:y,stroke:'#e8e8e8','stroke-width':RS_W_ORIG},gR);
+  }
+}
+
 
 
 // --- bottom bar ---
-el('rect',{x:80,y:362,width:640,height:28,fill:'none',stroke:'#cfcfcf','stroke-width':1.5});
-const modeChip=el('rect',{x:84,y:366,width:72,height:20,fill:'#e8e8e8'}); const modeTxt=txt(120,382,'MODE-–',{'text-anchor':'middle','font-size':15}); modeTxt.style.fill='#000';
-txt(170,384,'TRIP',{'font-size':15}); const tripTxt = txt(212,384,'0.00',{'font-size':19}); const tripU=txt(258,384,'',{'font-size':13,class:'dim'});
-txt(300,384,'AMP',{'font-size':15});  const ampTxt=txt(372,384,'0',{'text-anchor':'end','font-size':19});
-txt(402,384,'Wh',{'font-size':15});   const whTxt=txt(484,384,'0.0',{'text-anchor':'end','font-size':19});
-txt(514,384,'RGN',{'font-size':15});  const rgnTxt=txt(600,384,'0.0',{'text-anchor':'end','font-size':19});
-const fwTxt = txt(250,34,'',{'font-size':13,class:'dim'});
+el('rect',{x:40,y:366,width:720,height:34,fill:'none',stroke:'#85888c','stroke-width':1.5});   // same width as the top banner
+const botG=el('g',{transform:'translate(-36,8)'});   // contents shifted so the MODE chip lines up with the BT chip above
+const modeChip=el('rect',{x:84,y:362,width:86,height:26,fill:'#e8e8e8'},botG); const modeTxt=txt(127,382,'MODE-–',{'text-anchor':'middle','font-size':18},botG); modeTxt.style.fill='#000';
+txt(184,384,'TRIP',{'font-size':18},botG); const tripTxt = txt(232,384,'0.00',{'font-size':22},botG); const tripU=txt(284,384,'',{'font-size':15,class:'dim'},botG);
+txt(328,384,'AMP',{'font-size':18},botG);  const ampTxt=txt(412,384,'0',{'text-anchor':'end','font-size':22},botG);
+txt(444,384,'Wh',{'font-size':18},botG);   const whTxt=txt(538,384,'0.0',{'text-anchor':'end','font-size':22},botG);
+txt(570,384,'RGN',{'font-size':18},botG);  const rgnTxt=txt(664,384,'0.0',{'text-anchor':'end','font-size':22},botG);
+const fwTxt = txt(270,33,'',{'font-size':15,class:'dim'});
 
 // ======================= MATH =======================
 const POLE_PAIRS = MOTOR_POLES/2, WHEEL_CIRC = Math.PI*WHEEL_DIA_M;
@@ -170,27 +371,32 @@ function soc(vPack){const v=vPack/CELLS; if(v<=SOC_LUT[0][0])return 0;
 const temp = c => useF ? c*9/5+32 : c;
 
 // ======================= RENDER =======================
-let tripStartTach=null, socSmooth=null, last=null;
+let tripStartTach=null, socSmooth=null, last=null, regenF=0, powerF=0;
 function render(v){
   last=v;
   const rpm=motorRpm(v.erpm), ms=speedMs(v.erpm);
   setRpm(rpm);
   setDigits(useKmh ? ms*3.6 : ms*2.23694);
   unitTxt.textContent = useKmh?'km/h':'mph';
-  kwTxt.textContent = (v.vin*v.iIn/1000).toFixed(1);
+  setKw((v.vin*v.iIn/1000).toFixed(1));
   voltTxt.textContent = v.vin.toFixed(1);
   mtTxt.textContent = Math.round(temp(v.tMot)); ctTxt.textContent = Math.round(temp(v.tFet));
   mtU.textContent = ctU.textContent = useF?'°F':'°C';
   // battery: smooth so it doesn't jump with voltage sag
   const s=soc(v.vin); socSmooth = socSmooth===null ? s : socSmooth + (s-socSmooth)*0.02;
   socTxt.textContent = Math.round(socSmooth);
-  ladderBars.forEach((b,k)=>b.setAttribute('fill', k < Math.ceil(socSmooth/10) ? (socSmooth<20?'#ff3b30':'#4fc3f7') : '#1a1c1e'));
+  setBatt((socSmooth-BATT_EMPTY_PCT)/(100-BATT_EMPTY_PCT));   // bar = usable 'fuel': full at 100%, empty at 5%
   // trip since connect
   if(tripStartTach===null) tripStartTach=v.tachAbs;
   const m=tachToM(v.tachAbs-tripStartTach);
   tripTxt.textContent = (useKmh? m/1000 : m/1609.344).toFixed(2); tripU.textContent = useKmh?'km':'mi';
   ampTxt.textContent = Math.round(v.iIn); whTxt.textContent = v.wh.toFixed(1); rgnTxt.textContent = v.whc.toFixed(1);
   modeTxt.textContent = 'MODE-'+(MODE_NAMES[v.mode]??'–');
+  // power / regen fills (light smoothing so they move like a gauge)
+  const kwNow = v.vin*v.iIn/1000;
+  powerF += ((kwNow>0 ?  kwNow/POWER_MAX_KW : 0) - powerF)*0.35;
+  regenF += ((kwNow<0 ? -kwNow/REGEN_MAX_KW : 0) - regenF)*0.35;
+  setFill(FILL.power, powerF); setFill(FILL.regen, regenF);
   chipRegen.show(v.iIn < -0.5);
   chipFault.show(v.fault!==0);
   warnTxt.textContent = v.fault!==0 ? FAULTS[v.fault]||('FAULT '+v.fault)

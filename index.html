@@ -6,18 +6,25 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Cricket Dash</title>
 <style>
-  html, body { margin:0; height:100%; background:#000; overflow:hidden; -webkit-user-select:none; user-select:none; }
+  /* theme colors: dark (default) and light (long-press the clock). Everything not listed here is the same in both. */
+  :root { --bg:#000; --fg:#e8e8e8; --hi:#fff; --dim:#85888c; --bar:#9a9da1;
+          --cell:#2a2d31; --frame:#1c1f22; --chip-txt:#000; }
+  :root.light { --bg:#fff; --fg:#000; --hi:#000; --chip-txt:#fff;
+                --cell:#e3e5e8; --frame:#d0d2d5; }   /* placeholders until light colors are chosen */
+  /* top & bottom banners are solid black in both themes, so their contents keep the dark-theme colors */
+  :root.light .band { --fg:#e8e8e8; --hi:#fff; --dim:#85888c; --cell:#2a2d31; --chip-txt:#000; }
+  html, body { margin:0; height:100%; background:var(--bg); overflow:hidden; -webkit-user-select:none; user-select:none; }
   body { display:flex; align-items:center; justify-content:center; }
   svg { width:100vw; height:100vh; display:block; }
-  text { font-family:"Avenir Next Condensed","Helvetica Neue",Arial,sans-serif; font-weight:700; fill:#e8e8e8; }
+  text { font-family:"Avenir Next Condensed","Helvetica Neue",Arial,sans-serif; font-weight:700; fill:var(--fg); }
   .it { font-style:italic; }
-  .dim { fill:#85888c; }
+  .dim { fill:var(--dim); }
   .tap { cursor:pointer; }
   #overlay { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
              background:rgba(0,0,0,.72); color:#e8e8e8; font:700 22px "Avenir Next Condensed",sans-serif; letter-spacing:.08em; }
   #overlay small { margin-top:10px; font-size:13px; color:#9a9a9a; letter-spacing:.02em; font-weight:500; text-align:center; padding:0 20px; }
   #overlay.hidden { display:none; }
-  /* ---- diagnostics panel (long-press the clock, or open with ?diag) ---- */
+  /* ---- diagnostics panel (tap the clock 5 times, or open with ?diag) ---- */
   #diag { position:fixed; inset:0; background:rgba(5,6,7,.96); color:#e8e8e8; display:none; flex-direction:column;
           font:500 13px -apple-system,system-ui,sans-serif; padding:10px; padding-top:max(10px,env(safe-area-inset-top)); box-sizing:border-box; z-index:10; }
   #diag.open { display:flex; }
@@ -43,6 +50,7 @@
     <button id="dgRead" class="go">Read config</button>
     <button id="dgClear">Clear</button>
     <button id="dgCopy">Copy report</button>
+    <button id="dgDemo">Demo ride</button>
     <button id="dgClose">Close</button>
   </div>
   <div id="dgStatus">Set the throttle switch, tap Read config. Repeat for each mode (A, B, C).</div>
@@ -60,10 +68,10 @@ const RPM_RED     = 9000;     // start of red zone
 const WARN_FET_C  = 80, WARN_MOTOR_C = 100;  // warning thresholds
 const POLL_MS     = 100;
 const POWER_MAX_KW = 14;      // power bar full   (~180 A x 76 V)
-const REGEN_MAX_KW = 4;       // regen bar full
+const REGEN_MAX_KW = 0.7;     // regen bar full (controller caps regen at ~-8 A ≈ 0.6 kW)
 const BATT_EMPTY_PCT = 5;     // battery bar reads empty here (5% = 3.3 V/cell = 69.3 V on 21s)
 const MODE_NAMES  = {1:'C', 2:'B', 3:'A'};   // throttle switch position -> label
-const DEV_MODE    = false || new URLSearchParams(location.search).has('dev');   // true (or open with ?dev) = skip 'tap to connect' so the UI can be used in a desktop browser
+const DEV_MODE    = true || new URLSearchParams(location.search).has('dev');   // true (or open with ?dev) = skip 'tap to connect' so the UI can be used in a desktop browser
 const DEV_SELFTEST = false;  // dev only: true = power-on self-test look (all 8s, every bar full, every chip on); false = blank readouts
 
 // ======================= BLE / PROTOCOL =======================
@@ -83,26 +91,31 @@ const PKT_MCCONF = frame([CMD_GET_MCCONF]), PKT_APPCONF = frame([CMD_GET_APPCONF
 // ======================= SETTINGS (tap to toggle, remembered) =======================
 const store = { get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v);}catch{return d;}},
                 set(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}} };
-let useKmh = store.get('kmh', false), useF = store.get('degF', false);
+let useKmh = store.get('kmh', false), useF = store.get('degF', false);   // useKmh drives both the speedo (MPH/km/h) and the trip (MI/KM)
 
 // ======================= DRAW THE DASH =======================
 const NS = 'http://www.w3.org/2000/svg';
 const svg = document.getElementById('dash');
-function el(tag, attrs, parent=svg){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);parent.appendChild(e);return e;}
+// fill/stroke given as var(--x) are set as inline style (SVG presentation attributes can't use CSS variables)
+const isVar = v => typeof v==='string' && v.startsWith('var(');
+function el(tag, attrs, parent=svg){const e=document.createElementNS(NS,tag);
+  for(const k in attrs) if(!((k==='fill'||k==='stroke')&&isVar(attrs[k]))) e.setAttribute(k,attrs[k]);
+  for(const k of ['fill','stroke']) if(isVar(attrs[k])) e.style.setProperty(k,attrs[k]);
+  parent.appendChild(e);return e;}
 function txt(x,y,s,attrs={},parent=svg){const t=el('text',{x,y,...attrs},parent);t.textContent=s;return t;}
 
 // screen frame
-el('rect',{x:6,y:4,width:788,height:412,rx:18,fill:'#050607',stroke:'#1c1f22','stroke-width':3});
+el('rect',{x:6,y:4,width:788,height:412,rx:18,fill:'var(--bg)',stroke:'var(--frame)','stroke-width':3});
 
 // --- top status bar ---
-el('rect',{x:40,y:10,width:720,height:34,fill:'none',stroke:'#85888c','stroke-width':1.5});
+el('rect',{x:40,y:10,width:720,height:34,fill:'#000',stroke:'var(--dim)','stroke-width':1.5});
 const chipBT = chip(48,14,'BT'), chipRegen = chip(100,14,'REGEN'), chipFault = chip(184,14,'FAULT');
-chipFault.box.setAttribute('fill','#d32f2f'); chipFault.label.setAttribute('fill','#fff');
+chipFault.box.style.fill='#d32f2f'; chipFault.label.style.fill='#000';   // red in both themes
 const warnTxt = txt(470,35,'',{'text-anchor':'middle','font-size':20,fill:'#e53935'}); warnTxt.style.fill='#e53935';
-const clockTxt = txt(750,36,'--:--',{'text-anchor':'end','font-size':24});
-function chip(x,y,label){const g=el('g',{});const w=label.length*12+16;
-  const box=el('rect',{x,y,width:w,height:26,fill:'#e8e8e8'},g);
-  const t=txt(x+w/2,y+20,label,{'text-anchor':'middle','font-size':18},g); t.style.fill='#000';
+const clockTxt = txt(750,36,'--:--',{'text-anchor':'end','font-size':24,class:'band'});
+function chip(x,y,label){const g=el('g',{class:'band'});const w=label.length*12+16;
+  const box=el('rect',{x,y,width:w,height:26,fill:'var(--fg)'},g);
+  const t=txt(x+w/2,y+20,label,{'text-anchor':'middle','font-size':18},g); t.style.fill='var(--chip-txt)';
   g.style.display='none'; return {g,box,label:t,show(v){g.style.display=v?'':'none';}};}
 
 // --- RPM bar (R1 style) ---
@@ -114,66 +127,127 @@ const yTopAt = x => { const s=(x-TX0)/TW; return  72 +  89*Math.exp(-s/0.12); };
 const yBotRef = x => { const s=(x-TX0)/TW; return 106 + 147*Math.exp(-s/0.17); };
 const TACH_H = yBotRef(TX1) - yTopAt(TX1) + 6;         // bar height: right-most bar standard (~34) + 6
 const yBotAt = x => yTopAt(x) + TACH_H;                // every bar the same height all the way across
-// rpm -> x: low numbers bunched on the sweep (R1 spacing for 0-5k), then evenly spaced across the flat top
+// LAYOUT ONLY (sizes the bars and the label sizes): the original rpm -> x curve. The bar's actual RPM scale is
+// xAt below, which follows the printed labels.
 const RPM_T = [[0,0],[1000,.015],[2000,.05],[3000,.083],[4000,.13],[5000,.19]];
-function xAt(rpm){
+function xLayout(rpm){
   rpm=Math.max(0,Math.min(RPM_MAX,rpm));
   for(let i=1;i<RPM_T.length;i++){ const [r1,t1]=RPM_T[i],[r0,t0]=RPM_T[i-1];
     if(rpm<=r1) return TX0+TW*(t0+(t1-t0)*(rpm-r0)/(r1-r0)); }
   const [rL,tL]=RPM_T[RPM_T.length-1];
   return TX0+TW*(tL+(1-tL)*(rpm-rL)/(RPM_MAX-rL));
 }
-function rpmAt(x){ let lo=0,hi=RPM_MAX; for(let i=0;i<30;i++){const m=(lo+hi)/2; if(xAt(m)<x) lo=m; else hi=m;} return lo; }
-// segment layout (explicit widths, left to right):
-//   bars 1-5  : narrow strips on the sweep (as tuned)
-//   bars 6-10 : double-width blocks (2 x a standard top block)
-//   the rest  : standard top blocks filling out to the end; the last 4 are the red zone
-const SEG_GAP=2.2, segBounds=[];
+// segment layout. First a BASE layout of 2 bars per 1000 rpm (explicit widths, left to right):
+//   bars 1-6  : narrow strips on the sweep, growing smoothly toward bar 7
+//   bars 7-10 : double-width blocks (2 x a standard top block)
+//   bars 11-22: shrink smoothly from bar 10's width down to E, then 4 bars of E (E solved to fit the tach exactly)
+// Then each pair of base bars is merged into ONE bar taking exactly the pair's space, so the labels stay where
+// they were: one bar per 1000 rpm from 0 to 11k (last 2 red).
+const SEG_GAP=2.2, segBounds=[], baseBounds=[];
 const FIRST_BAR_EXTRA = 28;   // extra bar height at the far left, tapering to 0 at the far right
-const BLOCK_W = (TX1 - xAt(5000)) / 20;               // standard top block width (as it was)
-{ const W1 = 0.6*(xAt(5000)-TX0)/7.85;               // bar 1 width (unchanged)
+const BLOCK_W = (TX1 - xLayout(5000)) / 20;               // standard top block width (as it was)
+const MERGE_FROM = 0;                                    // base bars before this index stay separate; pairs merged after
+{ const W1 = 0.6*(xLayout(5000)-TX0)/7.85;               // bar 1 width (unchanged)
   const W7 = 2*BLOCK_W;                                // bar 7 width (double block)
-  const widths = [];
-  for(let k=0;k<6;k++) widths.push(W1*Math.pow(W7/W1, k/6));   // bars 1-6 grow smoothly toward bar 7
-  for(let k=0;k<4;k++) widths.push(W7);                // bars 7-10
-  // bars 11-18 shrink smoothly from bar 10's width down to bar 19's; bars 19-22 (red zone) are equal.
-  // Bar 19's width E is solved so everything fits exactly to the end of the tach.
-  const used = widths.reduce((a,b)=>a+b,0), room = TW-used;
+  const base = [];
+  for(let k=0;k<6;k++) base.push(W1*Math.pow(W7/W1, k/6));   // bars 1-6
+  for(let k=0;k<4;k++) base.push(W7);                  // bars 7-10
+  const used = base.reduce((a,b)=>a+b,0), room = TW-used;
   const tailWidths = E => { const w=[]; for(let k=1;k<=8;k++) w.push(W7*Math.pow(E/W7,k/9)); for(let k=0;k<4;k++) w.push(E); return w; };
   let lo=1, hi=W7; for(let i=0;i<50;i++){ const m=(lo+hi)/2, tot=tailWidths(m).reduce((a,b)=>a+b,0); if(tot>room) hi=m; else lo=m; }
-  widths.push(...tailWidths(lo));
-  let xx=TX0; for(const w of widths){ segBounds.push(xx); xx+=w; } segBounds.push(TX1);
+  base.push(...tailWidths(lo));
+  const widths = base.slice(0,MERGE_FROM);
+  for(let i=MERGE_FROM;i<base.length;i+=2) widths.push(base[i]+base[i+1]);
+  let xx=TX0; for(const w of base){ baseBounds.push(xx); xx+=w; } baseBounds.push(TX1);
+  xx=TX0;     for(const w of widths){ segBounds.push(xx); xx+=w; } segBounds.push(TX1);
 }
-const RED_SEGS = 4;                                    // last 4 blocks are red
+const RED_SEGS = 2;                                    // last 2 (9-10k, 10-11k) are red
+// RPM labels sit on the base layout's gaps, 2 base bars per 1000 rpm (unaffected by merging)
+const RPM_LABEL_X = (()=>{ const m={};
+  for(let r=1000;r<=10000;r+=1000) m[r]=baseBounds[2*r/1000];
+  return m; })();
+// the bar's RPM scale: straight lines between the labels, so the fill lines up with the printed numbers
+const RPM_SCALE = [[0,TX0], ...Object.entries(RPM_LABEL_X).map(([r,x])=>[+r,x]), [11000,TX1]];
+const RPM_FULL = RPM_SCALE[RPM_SCALE.length-1][0];   // rpm that fills the whole bar
+function xAt(rpm){ rpm=Math.max(0,Math.min(RPM_FULL,rpm));
+  for(let i=1;i<RPM_SCALE.length;i++){ const [r0,x0]=RPM_SCALE[i-1],[r1,x1]=RPM_SCALE[i];
+    if(rpm<=r1) return x0+(x1-x0)*(rpm-r0)/(r1-r0); } return TX1; }
+// main bar shape from xa to xr: follows the curves along the top and bottom edges (sampled every ~1.5 units)
+// so wide blocks stay smooth. setRpm redraws it with xr at the current rpm for a smooth sweep.
+const tEnd = baseBounds[9];   // start of the 10th BASE bar (unchanged by merging)
+const yBarBot = x => { const u=Math.min(1,(x-TX0)/(tEnd-TX0)); return yBotAt(x)+FIRST_BAR_EXTRA*(1-u)*(1-u); };   // extra height eases out to 0 by tEnd
+function barPoints(xa, xr){
+  const nS=Math.max(2,Math.ceil((xr-xa)/1.5)), pts=[];
+  for(let i=0;i<=nS;i++){ const x=xa+(xr-xa)*i/nS; pts.push([x,yTopAt(x)]); }
+  for(let i=nS;i>=0;i--){ const x=xa+(xr-xa)*i/nS; pts.push([x,yBarBot(x)]); }
+  return pts.map(q=>q.map(v=>v.toFixed(1)).join(',')).join(' ');
+}
 const segs=[];
 for(let k=0;k<segBounds.length-1;k++){
   const xa=segBounds[k]+SEG_GAP/2, xb=segBounds[k+1]-SEG_GAP/2;
-  // follow the curves along the top and bottom edges (sampled every ~1.5 units) so wide blocks stay smooth
-  const nS=Math.max(2,Math.ceil((xb-xa)/1.5)), pts=[];
-  for(let i=0;i<=nS;i++){ const x=xa+(xb-xa)*i/nS; pts.push([x,yTopAt(x)]); }
-  // extra bar height tapers smoothly from FIRST_BAR_EXTRA at the left end to 0 by the start of the 10th bar
-  const tEnd = segBounds[9];   // start of the 10th bar
-  for(let i=nS;i>=0;i--){ const x=xa+(xb-xa)*i/nS; const u=Math.min(1,(x-TX0)/(tEnd-TX0)); pts.push([x,yBotAt(x)+FIRST_BAR_EXTRA*(1-u)*(1-u)]); }   // eases out to 0 (no kink at the end) without bulging on the left
-  const p=el('polygon',{points:pts.map(q=>q.map(v=>v.toFixed(1)).join(',')).join(' ')});
-  segs.push({p, rpm:rpmAt(segBounds[k]), red: k >= segBounds.length-1-RED_SEGS});
+  const p=el('polygon',{points:''});
+  segs.push({p, xa, xb, xr:null, red: k >= segBounds.length-1-RED_SEGS});
 }
+// Each bar is split into a thin top strip and the thick main bar by a thin gap that follows the top edge's curve
+// (offset along the edge's normal so the distance stays even on the steep sweep).
+// The main bar (seg polygon) shows the RPM; the top strip and a small mid-bar tick bridging the gap are ALWAYS lit
+// (white, or bright red in the red zone).
+{ const W=SEG_GAP, INSET=W*1.5+1;   // INSET = to the gap's centre: top strip is one gap-width + 1 thick
+  const LIT = k => segs[k].red ? '#ff3b30' : 'var(--hi)';
+  // y of the top edge offset by d along the normal, at a given x (solved, since the offset shifts x too)
+  const yAtOffset = (x, d) => { let x0=x;
+    for(let i=0;i<8;i++){ const dy=yTopAt(x0+0.5)-yTopAt(x0-0.5), n=Math.hypot(1,dy); x0 = x + dy/n*d; }
+    const dy=yTopAt(x0+0.5)-yTopAt(x0-0.5), n=Math.hypot(1,dy); return yTopAt(x0) + d/n; };
+  const OVER=0.5;   // overlaps hidden under the gap / tick, so there are no hairline seams
+  // 1) always-lit top strips: top edge down into the gap (the gap line drawn next covers the overlap)
+  for(let k=0;k<segs.length;k++){
+    const xa=segBounds[k]+SEG_GAP/2, xb=segBounds[k+1]-SEG_GAP/2;
+    const nS=Math.max(2,Math.ceil((xb-xa)/1.5)), pts=[];
+    for(let i=0;i<=nS;i++){ const x=xa+(xb-xa)*i/nS; pts.push([x,yTopAt(x)]); }
+    for(let i=nS;i>=0;i--){ const x=xa+(xb-xa)*i/nS; pts.push([x,yAtOffset(x,INSET)]); }
+    el('polygon',{points:pts.map(q=>q.map(v=>v.toFixed(2)).join(',')).join(' '),fill:LIT(k)});
+  }
+  // 2) the gap itself, in the background colour; runs a little past both ends so the cut goes all the way through
+  const pts=[];
+  for(let x=TX0-15; x<=TX1+15; x+=1.5){
+    const dy=(yTopAt(x+0.5)-yTopAt(x-0.5)), n=Math.hypot(1,dy);
+    pts.push([x - dy/n*INSET, yTopAt(x) + 1/n*INSET]);
+  }
+  el('polyline',{points:pts.map(q=>q.map(v=>v.toFixed(1)).join(',')).join(' '),fill:'none',stroke:'var(--bg)','stroke-width':W});
+  // 3) always-lit tick in the middle of each bar, bridging the gap, one gap-width thick. Drawn as a shape whose
+  //    top and bottom follow the slanted gap edges (not flat ends), so on the steep left sweep no corner pokes out:
+  //    the top runs OVER up inside the strip, the bottom stops exactly on the main bar's top edge
+  //    (so an unlit bar doesn't show a lit stub).
+  for(let k=0;k<segs.length;k++){
+    const xm=(segBounds[k]+segBounds[k+1])/2, xl=xm-W/2, xr=xm+W/2;
+    const pts=[[xl,yAtOffset(xl,INSET-W/2-OVER)], [xr,yAtOffset(xr,INSET-W/2-OVER)],
+               [xr,yAtOffset(xr,INSET+W/2)],      [xl,yAtOffset(xl,INSET+W/2)]];
+    el('polygon',{points:pts.map(q=>q.map(v=>v.toFixed(2)).join(',')).join(' '),fill:LIT(k)});
+  } }
 // numbers sit just above the top edge, pushed out along its normal
 for(let r=1000;r<=RPM_MAX;r+=1000){
-  const END=segBounds.length-1;   // 4..10 sit on block gaps, two blocks apart, counted back from the end
-  const LABEL_GAP = {4000:END-14, 5000:END-12, 6000:END-10, 7000:END-8, 8000:END-6, 9000:END-4, 10000:END-2};
-  const LABEL_X = {1000: segBounds[2], 2000: segBounds[4], 3000: segBounds[6]};   // labels pinned to gaps between strips: 1 (2nd|3rd), 2 (4th|5th), 3 (6th|7th)
-  const x=LABEL_X[r] ?? segBounds[LABEL_GAP[r]], y=yTopAt(x),
+  const x=RPM_LABEL_X[r], y=yTopAt(x),
  dy=(yTopAt(x+1)-yTopAt(x-1))/2, n=Math.hypot(1,dy);
   const LABEL_OFF=9;                       // distance of numbers from the tach edge
   const ox=dy/n*LABEL_OFF, oy=-1/n*LABEL_OFF;   // along the normal pointing up / up-left
-  const small = x < xAt(5000)-1;   // smaller labels only on the sweep
+  const small = x < xLayout(5000)-1;   // smaller labels only on the sweep
   const t=txt(x+ox, y+oy+(small?2:6), String(r/1000),{'text-anchor':'middle','font-size':20,class:'it'});
   t.style.fontWeight='900';   // bold tach numbers
   if(r>=RPM_RED) t.style.fill='#e53935';
 }
+// smooth sweep: every bar left of the rpm is full, the bar the rpm is in fills up to the exact rpm position
+// (the gaps between bars stay dark), bars to the right are empty. Same colour as the always-lit top strip.
 function setRpm(rpm){
-  segs.forEach(s=>{const on = rpm > s.rpm + 1;
-    s.p.setAttribute('fill', s.red ? (on?'#ff3b30':'#b71c1c') : (on?'#ececec':'#2b2d30'));});
+  const x = rpm>0 ? xAt(rpm) : TX0;
+  for(const s of segs){
+    const xr = Math.min(s.xb, x);
+    const show = xr - s.xa > 0.3;                    // ignore slivers thinner than a hairline
+    const key = show ? xr.toFixed(1) : null;
+    if(key===s.xr) continue;                         // unchanged: skip the redraw
+    s.xr = key;
+    s.p.setAttribute('points', show ? barPoints(s.xa, xr) : '');
+    s.p.style.fill = s.red ? '#ff3b30' : 'var(--hi)';
+  }
 }
 
 // --- speed: R1-style digits — continuous stroke, upright, generously rounded corners ---
@@ -216,14 +290,14 @@ function digitPath(ch, D=DIG){
 const digits=[];
 for(let d=0;d<3;d++){
   const g=el('g',{transform:`translate(${SPEED_X+d*(DIG.w+DIG.gap)},${SPEED_Y})`});
-  digits.push(el('path',{d:'',fill:'none',stroke:'#ececec','stroke-width':DIG.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g));
+  digits.push(el('path',{d:'',fill:'none',stroke:'var(--hi)','stroke-width':DIG.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g));
 }
 function setDigits(n){
   const s=String(Math.max(0,Math.min(999,Math.round(n)))).padStart(3,' ');
   digits.forEach((p,i)=>p.setAttribute('d',digitPath(s[i])));
 }
 const unitTxt = txt(SPEED_X+3*(DIG.w+DIG.gap)+2, SPEED_Y+DIG.h, '', {'font-size':24,class:'tap'});
-unitTxt.style.fill='#85888c'; unitTxt.style.fontWeight='500';   // grey, lighter weight
+unitTxt.style.fill='var(--dim)'; unitTxt.style.fontWeight='500';   // grey, lighter weight
 const speedG=el('g',{class:'tap',style:'user-select:none;-webkit-user-select:none;-webkit-touch-callout:none'});
 el('rect',{x:SPEED_X-4,y:SPEED_Y-4,width:3*(DIG.w+DIG.gap)+60,height:DIG.h+8,fill:'transparent'},speedG);   // invisible touch box over the speed
 digits.forEach(p=>speedG.appendChild(p.parentNode)); speedG.appendChild(unitTxt);
@@ -231,7 +305,7 @@ digits.forEach(p=>speedG.appendChild(p.parentNode)); speedG.appendChild(unitTxt)
 // --- power box (where the R1 shows gear) ---
 const PB={dx:22, dy:-22};   // power box offset (moved up/right to sit just under the speed)
 const pbG=el('g',{});      // shifted at startup so its right edge lands just past the 'h' of 'mph'
-el('rect',{x:352+PB.dx,y:290+PB.dy,width:196,height:92,fill:'none',stroke:'#85888c','stroke-width':1.5},pbG);   // bottom edge just above the bottom banner
+el('rect',{x:352+PB.dx,y:290+PB.dy,width:196,height:92,fill:'none',stroke:'var(--dim)','stroke-width':1.5},pbG);   // bottom edge just above the bottom banner
 const pwrLbl=txt(362+PB.dx,314+PB.dy,'Power',{'font-size':20,class:'dim'},pbG); pwrLbl.style.fontWeight='600';   // same size as 'mph', slightly heavier
 // kW value drawn with the speed's digit style, scaled to the old text size (right-aligned at the same spot)
 const KW_H = 44;   // digit height in the Power box
@@ -240,26 +314,26 @@ const kwG = el('g',{},pbG), KW_RIGHT = 504+PB.dx, KW_BASE = 373+PB.dy;   // bott
 function setKw(str){
   kwG.innerHTML=''; const D=KW_DIG, dotW=D.t*1.6; let x=KW_RIGHT;
   for(const ch of [...str].reverse()){
-    if(ch==='.'){ x-=dotW; el('rect',{x:x+(dotW-D.t)/2,y:KW_BASE-D.t,width:D.t,height:D.t,rx:D.t*0.25,fill:'#ececec'},kwG); x-=D.gap*0.4; continue; }
+    if(ch==='.'){ x-=dotW; el('rect',{x:x+(dotW-D.t)/2,y:KW_BASE-D.t,width:D.t,height:D.t,rx:D.t*0.25,fill:'var(--hi)'},kwG); x-=D.gap*0.4; continue; }
     const adv = ch==='1' ? ONE_FLAG*D.w + D.t : D.w;          // '1' takes only the space it needs here (no LCD gap)
     x-=adv; const g=el('g',{transform:`translate(${(x-(D.w-adv)).toFixed(1)},${KW_BASE-D.h})`},kwG);
     const d = ch==='-' ? `M${D.t/2},${D.h/2} H${D.w-D.t/2}` : digitPath(ch,D);
-    if(d) el('path',{d,fill:'none',stroke:'#ececec','stroke-width':D.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g);
+    if(d) el('path',{d,fill:'none',stroke:'var(--hi)','stroke-width':D.t,'stroke-linejoin':'round','stroke-linecap':'butt'},g);
     x-=D.gap;
   }
 }
 setKw('0.0');
 // battery icon: solid white vertical battery with a see-through lightning bolt (moves with the Power box)
-{ const w=16, h=30, r=3, nubW=7, nubH=3.5, bx=352+PB.dx+196+20, byBot=290+PB.dy+92-5;   // 5 up from the box bottom
+{ const w=16, h=30, r=3, nubW=7, nubH=3.5, bx=352+PB.dx+196+11, byBot=290+PB.dy+92-5;   // 5 up from the box bottom
   const bi=el('g',{transform:`translate(${bx},${byBot-h})`},pbG);
   const body=`M${r},0 H${w-r} Q${w},0 ${w},${r} V${h-r} Q${w},${h} ${w-r},${h} H${r} Q0,${h} 0,${h-r} V${r} Q0,0 ${r},0 Z`;
   const bolt=`M${w*0.62},${h*0.13} L${w*0.24},${h*0.57} H${w*0.5} L${w*0.4},${h*0.89} L${w*0.78},${h*0.43} H${w*0.52} L${w*0.69},${h*0.13} Z`;
-  el('path',{d:body+' '+bolt,'fill-rule':'evenodd',fill:'#ececec'},bi);                         // bolt is cut out (clear)
-  el('rect',{x:(w-nubW)/2,y:-nubH,width:nubW,height:nubH+0.5,rx:1,fill:'#ececec'},bi);           // terminal
+  el('path',{d:body+' '+bolt,'fill-rule':'evenodd',fill:'var(--hi)'},bi);                         // bolt is cut out (clear)
+  el('rect',{x:(w-nubW)/2,y:-nubH,width:nubW,height:nubH+0.5,rx:1,fill:'var(--hi)'},bi);           // terminal
 }
 txt(540+PB.dx,373+PB.dy,'kW',{'text-anchor':'end','font-size':24,style:'font-weight:500',class:'dim'},pbG);
 // line the power box's right edge up just past the end of 'mph'
-{ const keep=unitTxt.textContent; unitTxt.textContent='mph';
+{ const keep=unitTxt.textContent; unitTxt.textContent='MPH';
   try{ const bb=unitTxt.getBBox(), right=bb.x+bb.width+7, boxRight=352+PB.dx+196;
        pbG.setAttribute('transform',`translate(${(right-boxRight).toFixed(1)},0)`); }catch{}
   unitTxt.textContent=keep; }
@@ -269,14 +343,15 @@ const READ_SHIFT={x:-52,y:12};   // whole table (both pages + touch box): left/d
 const readG=el('g',{class:'tap',transform:`translate(${READ_SHIFT.x},${READ_SHIFT.y})`,style:'user-select:none;-webkit-user-select:none;-webkit-touch-callout:none'});
 el('rect',{x:96,y:216,width:236,height:132,fill:'transparent'},readG);   // invisible touch box over the 4 rows
 const readA=el('g',{},readG), readB=el('g',{},readG);                     // page A = live data, page B = alt data
-txt(104,240,'BATT',{'font-size':18,style:'font-weight:600'},readA); const socTxt=txt(300,242,'--',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,242,'%',{'font-size':14,class:'dim'},readA);
-txt(104,272,'VOLT',{'font-size':18,style:'font-weight:600'},readA);   const voltTxt=txt(300,274,'--.-',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,274,'V',{'font-size':14,class:'dim'},readA);
-txt(104,304,'BATT CURRENT',{'font-size':18,style:'font-weight:600'},readA); const ampTxt=txt(300,306,'0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,306,'A',{'font-size':14,class:'dim'},readA);
-txt(104,336,'PHASE CURRENT',{'font-size':18,style:'font-weight:600'},readA); const phaseTxt=txt(300,338,'0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readA); txt(306,338,'A',{'font-size':14,class:'dim'},readA);   // motor (phase) current
+txt(104,240,'BATT',{'font-size':18,style:'font-weight:600'},readA); const socTxt=txt(300,242,'--',{'text-anchor':'end','font-size':26,style:'font-weight:500'},readA); txt(306,242,'%',{'font-size':14,class:'dim'},readA);
+txt(104,272,'VOLT',{'font-size':18,style:'font-weight:600'},readA);   const voltTxt=txt(300,274,'--.-',{'text-anchor':'end','font-size':26,style:'font-weight:500'},readA); txt(306,274,'V',{'font-size':14,class:'dim'},readA);
+txt(104,304,'BATT CUR',{'font-size':18,style:'font-weight:600'},readA); const ampTxt=txt(300,306,'0',{'text-anchor':'end','font-size':26,style:'font-weight:500'},readA); txt(306,306,'A',{'font-size':14,class:'dim'},readA);
+txt(104,336,'MTR CUR',{'font-size':18,style:'font-weight:600'},readA); const phaseTxt=txt(300,338,'0',{'text-anchor':'end','font-size':26,style:'font-weight:500'},readA); txt(306,338,'A',{'font-size':14,class:'dim'},readA);   // motor (phase) current
 // page B: trip / Wh / regen Wh (same layout as page A)
-txt(104,240,'TRIP',{'font-size':18,style:'font-weight:600'},readB); const tripTxt=txt(300,242,'0.00',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readB); const tripU=txt(306,242,'',{'font-size':14,class:'dim'},readB);
-txt(104,272,'REGEN',{'font-size':18,style:'font-weight:600'},readB); const rgnTxt=txt(300,274,'0.0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readB); txt(306,274,'Wh',{'font-size':14,class:'dim'},readB);
-txt(104,304,'ENERGY USED',{'font-size':18,style:'font-weight:600'},readB); const whTxt=txt(300,306,'0.0',{'text-anchor':'end','font-size':26,style:'font-weight:600',class:'it'},readB); txt(306,306,'Wh',{'font-size':14,class:'dim'},readB);
+const tripRow=el('g',{},readB); el('rect',{x:96,y:216,width:236,height:40,fill:'transparent'},tripRow);   // trip row hit area (long-press toggles MI/KM)
+txt(104,240,'TRIP',{'font-size':18,style:'font-weight:600'},tripRow); const tripTxt=txt(300,242,'0.00',{'text-anchor':'end','font-size':26,style:'font-weight:500'},tripRow); const tripU=txt(306,242,'',{'font-size':14,class:'dim'},tripRow);
+txt(104,272,'REGEN',{'font-size':18,style:'font-weight:600'},readB); const rgnTxt=txt(300,274,'0.0',{'text-anchor':'end','font-size':26,style:'font-weight:500'},readB); txt(306,274,'Wh',{'font-size':14,class:'dim'},readB);
+txt(104,304,'USED',{'font-size':18,style:'font-weight:600'},readB); const whTxt=txt(300,306,'0.0',{'text-anchor':'end','font-size':26,style:'font-weight:500'},readB); txt(306,306,'Wh',{'font-size':14,class:'dim'},readB);
 let readPage = store.get('readPage', 0);
 const showReadPage = ()=>{ readA.style.display = readPage ? 'none' : ''; readB.style.display = readPage ? '' : 'none'; };
 showReadPage();
@@ -284,7 +359,7 @@ showReadPage();
 // --- right side, R1 style: two back-to-back brackets ---
 const RS={top:152, bot:352, spineL:688, spineR:701, arm:34};   // spines 13 apart = 8-unit clear gap (matches R_GAP)
 const RS_W_ORIG = 3;            // original line thickness (noted for later)
-const RS_W = 5, RS_COL = '#85888c';  // bracket line thickness / light grey
+const RS_W = 5, RS_COL = 'var(--bar)';  // bracket line thickness / light grey
 const gL=el('g',{});
 // left bracket: open to the left, tapers wide (top) to narrow (bottom); 4 ticks follow the taper
 const TICK_GAP=7;   // inner ticks sit this far left of the spine
@@ -301,7 +376,7 @@ for(let k=0;k<5;k++){
   const x2 = RS.spineL-TICK_GAP;
   const lenTop = x2-(RS.spineL-L_TOP+TICK_GAP), lenBot = x2-(RS.spineL-L_BOT);   // bottom tick's left edge flush with the bottom grey line's left edge
   const x1 = x2 - (lenTop + (lenBot-lenTop)*k/4);
-  el('line',{x1,y1:y,x2,y2:y,stroke:'#e8e8e8','stroke-width':RS_W_ORIG},gL);
+  el('line',{x1,y1:y,x2,y2:y,stroke:'var(--fg)','stroke-width':RS_W_ORIG},gL);
 }
 // right bracket: exact mirror of the left one, flipped about the gap between the spines
 const MIRROR_X = RS.spineL + RS.spineR;   // = 2 x centre line
@@ -339,8 +414,8 @@ const FILL = (()=>{
   const rIn = yUpper-tw-RS_W_ORIG, rOut = RS.top+tw+RS_W_ORIG;      // regen: innermost / outermost tick
   const pIn = yLower+tw+RS_W_ORIG, pOut = RS.bot-tw-RS_W_ORIG;      // power: innermost / outermost tick
   return {
-    regen: mk(rIn+h, rOut-h, rIn, rOut, '#2ecc71'),
-    power: mk(pIn-h, pOut+h, pIn, pOut, '#1e88e5'),
+    regen: mk(rIn+h, rOut-h, rIn, rOut, '#21914f'),
+    power: mk(pIn-h, pOut+h, pIn, pOut, '#074be5'),
     xIn: x2, x2,
   };
 })();
@@ -358,7 +433,7 @@ const BATT = (()=>{
   const x2 = RS.spineL - TICK_GAP;                                    // where the ticks end next to the spine
   const lenTop = x2-(RS.spineL-L_TOP+TICK_GAP), lenBot = x2-(RS.spineL-L_BOT);
   const yTopTick = TICK_Y0 + RS_W_ORIG, yBotTick = TICK_Y4, h = RS_W_ORIG/2;
-  const p = el('path',{d:'',fill:'#318193'});   // battery blue
+  const p = el('path',{d:'',fill:'#074be5'});   // battery blue
   gL.insertBefore(p, gL.querySelector('line'));                       // behind the ticks
   const widthAt = y => { const t=Math.max(0,Math.min(1,(yBotTick-y)/(yBotTick-yTopTick)));   // 0 bottom .. 1 top
                          const tc = 0.55*t + 0.45*t*t;                   // gentle curve instead of a straight taper
@@ -387,30 +462,40 @@ function setBatt(frac){
             + (k===4 ? Math.sign(b.yOuter-b.yInner)*RS_W_ORIG : 0);   // innermost tick nudged one more tick-width away from the middle grey line
     const t = 1 - k/4;                                   // 1 at the outer tick, 0 at the innermost
     const len = LEN_SHORT + (LEN_LONG-LEN_SHORT)*t*t;    // curved sweep instead of a straight taper
-    el('line',{x1:x2-len,y1:y,x2,y2:y,stroke:'#e8e8e8','stroke-width':RS_W_ORIG},gR);
+    el('line',{x1:x2-len,y1:y,x2,y2:y,stroke:'var(--fg)','stroke-width':RS_W_ORIG},gR);
   }
 }
 
 
 
 // --- bottom bar ---
-el('rect',{x:40,y:366,width:720,height:34,fill:'none',stroke:'#85888c','stroke-width':1.5});   // same width as the top banner
-const botG=el('g',{transform:'translate(-36,8)'});   // contents shifted so the MODE chip lines up with the BT chip above
-const modeChip=el('rect',{x:84,y:362,width:86,height:26,fill:'#e8e8e8'},botG); const modeTxt=txt(127,382,'MODE-–',{'text-anchor':'middle','font-size':18,style:'font-weight:600'},botG); modeTxt.style.fill='#000';
+el('rect',{x:40,y:366,width:720,height:34,fill:'#000',stroke:'var(--dim)','stroke-width':1.5});   // same width as the top banner
+const botG=el('g',{class:'band',transform:'translate(-36,8)'});   // contents shifted so the MODE chip lines up with the BT chip above
+const modeChip=el('rect',{x:84,y:362,width:86,height:26,fill:'var(--fg)'},botG); const modeTxt=txt(127,382,'MODE-–',{'text-anchor':'middle','font-size':18,style:'font-weight:600'},botG); modeTxt.style.fill='var(--chip-txt)';
 // M.TEMP and C.TEMP: each in a dark grey box (same height as the MODE chip); value sits a fixed gap after its title,
-// unit follows the value, box hugs the lot. M box starts 8 after the MODE chip, C box 8 after the M box.
-function tempCell(title){ const box=el('rect',{x:0,y:362,width:0,height:26,fill:'#1c1e21'},botG);
-  const lbl=txt(0,381.4,title,{'font-size':18,style:'font-weight:600'},botG);
-  const val=txt(0,384.5,'--',{'font-size':26,style:'font-weight:600'},botG), unit=txt(0,384.5,'',{'font-size':15,class:'dim'},botG);
-  return {box,lbl,val,unit}; }
+// unit follows the value. The value gets a fixed slot as wide as '888' (right-aligned inside it) and the unit a slot
+// as wide as the wider of °C/°F, so the boxes never resize as temps change.
+// C box ends 8 inside the banner's right edge, M box sits 8 before it.
+function tempCell(title){ const g=el('g',{class:'tap',style:'-webkit-touch-callout:none'},botG);   // one group per box = one press target
+  const box=el('rect',{x:0,y:362,width:0,height:26,fill:'var(--cell)'},g);
+  const lbl=txt(0,381.4,title,{'font-size':18,style:'font-weight:600'},g);
+  const val=txt(0,384.5,'--',{'font-size':26,style:'font-weight:600'},g), unit=txt(0,384.5,'',{'font-size':15,class:'dim'},g);
+  return {g,box,lbl,val,unit}; }
 const mtCell=tempCell('M.TEMP'), ctCell=tempCell('C.TEMP');
 const mtTxt=mtCell.val, mtU=mtCell.unit, ctTxt=ctCell.val, ctU=ctCell.unit;
+// width a text element would have with each of the given strings (widest wins); restores its real text
+function slotW(t, ...strs){ const keep=t.textContent; let w=0;
+  for(const s of strs){ t.textContent=s; w=Math.max(w,t.getBBox().width); }
+  t.textContent=keep; return w; }
 function layoutCell(c,x){ const GAP=8, PAD=8; let tx=x+PAD;
   c.box.setAttribute('x',x); c.lbl.setAttribute('x',tx);
-  tx+=c.lbl.getBBox().width+GAP; c.val.setAttribute('x',tx.toFixed(1));
-  tx+=c.val.getBBox().width+4;   c.unit.setAttribute('x',tx.toFixed(1));
-  const w=tx+c.unit.getBBox().width+PAD-x; c.box.setAttribute('width',w.toFixed(1)); return x+w; }
-function layoutMt(){ try{ layoutCell(ctCell, layoutCell(mtCell,178)+8); }catch{} }
+  tx+=c.lbl.getBBox().width+GAP;
+  tx+=slotW(c.val,'888',c.val.textContent); c.val.setAttribute('text-anchor','end'); c.val.setAttribute('x',tx.toFixed(1));
+  tx+=4; c.unit.setAttribute('x',tx.toFixed(1));
+  const w=tx+slotW(c.unit,'°C','°F')+PAD-x; c.box.setAttribute('width',w.toFixed(1)); return x+w; }
+// right-aligned: C box ends 8 inside the banner's right edge (banner right = 760; botG is shifted -36, so 796-8 = 788),
+// mirroring the MODE chip's 8 gap on the left. Lay out once from 0 to measure, then again at the real x.
+function layoutMt(){ try{ const w=layoutCell(ctCell, layoutCell(mtCell,0)+8); const x0=788-w; layoutCell(ctCell, layoutCell(mtCell,x0)+8); }catch{} }
 layoutMt();
 const fwTxt = txt(270,33,'',{'font-size':15,class:'dim'});
 
@@ -432,7 +517,7 @@ function render(v){
   const rpm=motorRpm(v.erpm), ms=speedMs(v.erpm);
   setRpm(rpm);
   setDigits(useKmh ? ms*3.6 : ms*2.23694);
-  unitTxt.textContent = useKmh?'km/h':'mph';
+  unitTxt.textContent = useKmh?'km/h':'MPH';
   setKw((v.vin*v.iIn/1000).toFixed(1));
   voltTxt.textContent = v.vin.toFixed(1);
   mtTxt.textContent = Math.round(temp(v.tMot)); ctTxt.textContent = Math.round(temp(v.tFet));
@@ -444,7 +529,7 @@ function render(v){
   // trip since connect
   if(tripStartTach===null) tripStartTach=v.tachAbs;
   const m=tachToM(v.tachAbs-tripStartTach);
-  tripTxt.textContent = (useKmh? m/1000 : m/1609.344).toFixed(2); tripU.textContent = useKmh?'km':'mi';
+  tripTxt.textContent = (useKmh? m/1000 : m/1609.344).toFixed(2); tripU.textContent = useKmh?'KM':'MI';
   ampTxt.textContent = Math.round(v.iIn); phaseTxt.textContent = Math.round(v.iMot); whTxt.textContent = v.wh.toFixed(1); rgnTxt.textContent = v.whc.toFixed(1);
   modeTxt.textContent = 'MODE-'+(MODE_NAMES[v.mode]??'–');
   // power / regen fills (light smoothing so they move like a gauge)
@@ -462,29 +547,35 @@ const FAULTS=['NONE','OVER VOLTAGE','UNDER VOLTAGE','DRV','ABS OVER CURRENT','FE
   'ENCODER SINCOS HIGH','FLASH CORRUPTION','CURRENT SENSOR 1','CURRENT SENSOR 2','CURRENT SENSOR 3','UNBALANCED CURRENTS',
   'BRK','RESOLVER LOT','RESOLVER DOS','RESOLVER LOS','FLASH APP CFG','FLASH MC CFG','ENCODER NO MAGNET','MAGNET TOO STRONG','PHASE FILTER'];
 
-// taps: speedo long-press (or tap 'mph') toggles mph/kmh; left readouts: tap flips data page, long-press toggles °C/°F
+// taps: speedo long-press (or tap 'MPH') toggles mph/kmh; left readouts: tap flips data page,
+// long-press on the trip row toggles MI/KM, long-press anywhere else toggles °C/°F
 function onPress(target, onLong, onTap, LONG_MS=600){
   let timer=null, fired=false; const cancel=()=>{clearTimeout(timer); timer=null;};
-  target.addEventListener('pointerdown',()=>{ fired=false; cancel(); timer=setTimeout(()=>{ fired=true; onLong(); },LONG_MS); });
+  target.addEventListener('pointerdown',e=>{ fired=false; cancel(); timer=setTimeout(()=>{ fired=true; onLong(e); },LONG_MS); });
   ['pointerup','pointerleave','pointercancel'].forEach(t=>target.addEventListener(t,cancel));
   target.addEventListener('contextmenu',e=>e.preventDefault());     // no long-press menu on touch screens
   target.addEventListener('click',e=>{ e.stopPropagation(); if(fired){fired=false;return;} onTap&&onTap(e); });
 }
-const toggleSpeedUnit=()=>{ useKmh=!useKmh; store.set('kmh',useKmh); unitTxt.textContent=useKmh?'km/h':'mph'; last ? render(last) : DEV_MODE&&DEV_SELFTEST&&devPlaceholders(); };
+const toggleSpeedUnit=()=>{ useKmh=!useKmh; store.set('kmh',useKmh); unitTxt.textContent=useKmh?'km/h':'MPH'; tripU.textContent=useKmh?'KM':'MI'; last ? render(last) : DEV_MODE&&DEV_SELFTEST&&devPlaceholders(); };
 onPress(speedG, toggleSpeedUnit, e=>{ if(e.target===unitTxt) toggleSpeedUnit(); });
-onPress(readG, ()=>{ useF=!useF; store.set('degF',useF); last ? render(last) : DEV_MODE&&DEV_SELFTEST&&devPlaceholders(); },
+onPress(readG, e=>{ if(readPage && tripRow.contains(e.target)){ toggleSpeedUnit(); return; }   // trip row: MI/KM (and the speedo with it)
+                    useF=!useF; store.set('degF',useF); last ? render(last) : DEV_MODE&&DEV_SELFTEST&&devPlaceholders(); },
                ()=>{ readPage=readPage?0:1; store.set('readPage',readPage); showReadPage(); });
+// long-press either temp box (M.TEMP / C.TEMP) to switch both between °C and °F
+const toggleTempUnit=()=>{ useF=!useF; store.set('degF',useF); mtU.textContent=ctU.textContent=useF?'°F':'°C'; layoutMt();
+                          last ? render(last) : DEV_MODE&&DEV_SELFTEST&&devPlaceholders(); };
+for(const c of [mtCell, ctCell]) onPress(c.g, toggleTempUnit, null);
 const tick=()=>{ if(DEV_MODE&&DEV_SELFTEST) return;   // dev self-test holds the clock at 88:88
   const d=new Date();clockTxt.textContent=d.getHours()+':'+String(d.getMinutes()).padStart(2,'0');}; tick(); setInterval(tick,1000);
-setRpm(0); setDigits(0); unitTxt.textContent=useKmh?'km/h':'mph';
+setRpm(0); setDigits(0); unitTxt.textContent=useKmh?'km/h':'MPH'; tripU.textContent=useKmh?'KM':'MI';
 // DEV placeholders (only with DEV_MODE / ?dev, until real data arrives): power-on SELF TEST look —
 // every bar full, every chip on, every number all 8s at its widest width. Unit labels still follow the toggles.
 function devPlaceholders(){
-  setRpm(RPM_MAX); setDigits(888); setKw('88.8');
+  setRpm(RPM_FULL); setDigits(888); setKw('88.8');
   setFill(FILL.power,1); setFill(FILL.regen,1); setBatt(1);
   socTxt.textContent='888'; voltTxt.textContent='88.8'; ampTxt.textContent='888'; phaseTxt.textContent='888';
   mtTxt.textContent=ctTxt.textContent='888'; mtU.textContent=ctU.textContent=useF?'°F':'°C'; layoutMt();
-  tripTxt.textContent='888.88'; tripU.textContent=useKmh?'km':'mi'; whTxt.textContent=rgnTxt.textContent='8888.8';
+  tripTxt.textContent='888.88'; tripU.textContent=useKmh?'KM':'MI'; whTxt.textContent=rgnTxt.textContent='8888.8';
   modeTxt.textContent='MODE-8'; clockTxt.textContent='88:88';
   chipBT.show(true); chipRegen.show(true); chipFault.show(true);
   warnTxt.textContent=FAULTS.reduce((a,b)=>b.length>a.length?b:a);                                // longest fault name
@@ -533,6 +624,7 @@ async function connect(){
     tx.addEventListener('characteristicvaluechanged',onNotify);
     await tx.startNotifications();
     await rx.writeValue(PKT_FW);
+    stopDemo();                                   // real data takes over from the demo
     tripStartTach=null; socSmooth=null;
     pollTimer=setInterval(poll,POLL_MS);
     overlay.classList.add('hidden'); chipBT.show(true);
@@ -547,6 +639,59 @@ function onDisconnected(){
 if(DEV_MODE) overlay.classList.add('hidden');   // dev: no connect screen, UI is live without BLE
 else overlay.addEventListener('click',connect);
 chipBT.g.addEventListener('click',()=>device?.gatt?.connected&&device.gatt.disconnect());
+
+// ======================= DEMO RIDE =======================
+// Simulated ride fed through render() exactly like live controller data. Start with ?demo in the URL or the
+// 'Demo ride' button in the diagnostics panel (tap again to stop). Stops by itself when a real controller connects.
+// One loop (~40 s): idle -> hard launch into the red zone -> ease off -> cruise -> roll on -> brake with regen -> stop.
+// Each loop the throttle mode steps C -> B -> A.
+const DEMO_SCRIPT = [   // [seconds, target motor rpm, label]
+  [2,    0, 'idle'], [8, 9300, 'launch'], [2, 9300, 'hold'], [3, 6000, 'ease off'],
+  [8, 6000, 'cruise'], [4, 8000, 'roll on'], [6,    0, 'brake'], [3,    0, 'stopped'],
+];
+const DEMO_LOOP = DEMO_SCRIPT.reduce((a,[d])=>a+d,0);
+let demoTimer=null, demoFwKeep='';
+function demoTarget(t){ t%=DEMO_LOOP; for(const [d,rpm] of DEMO_SCRIPT){ if(t<d) return rpm; t-=d; } return 0; }
+function startDemo(){
+  if(demoTimer) return;
+  if(device?.gatt?.connected) return;               // never fake data over a real connection
+  const dt=POLL_MS/1000;
+  const st={t:0, rpm:0, tach:0, wh:0, whc:0, tMot:24, tFet:23, loop:0};
+  tripStartTach=null; socSmooth=null;
+  demoFwKeep=fwTxt.textContent; fwTxt.textContent='DEMO';
+  overlay.classList.add('hidden'); chipBT.show(true);   // look connected while the demo runs
+  demoTimer=setInterval(()=>{
+    st.t+=dt; st.loop=Math.floor(st.t/DEMO_LOOP);
+    // motor rpm chases the scripted target with limited acceleration / braking
+    const target=demoTarget(st.t), prev=st.rpm;
+    const a=Math.max(-2200, Math.min(1600, (target-st.rpm)*0.9));   // rpm/s
+    st.rpm=Math.max(0, st.rpm+a*dt);
+    const accel=(st.rpm-prev)/dt;
+    // battery current: drag (~40 A cruising at 6000 rpm) + acceleration; regen capped at -8 A like the real controller
+    const drag = 40*Math.pow(st.rpm/6000,2);
+    let iIn = st.rpm<1 ? 0 : drag + accel*0.1;
+    iIn = accel < -50 ? Math.max(-8, Math.min(0, iIn)) : Math.max(0, Math.min(185, iIn));
+    // phase current is higher than battery current at low rpm (torque without much speed)
+    const iMot = iIn * Math.min(3, Math.max(1, 2500/Math.max(st.rpm,1)));
+    // pack: resting voltage drains a little with energy used (exaggerated so the battery visibly moves), sags under load
+    if(iIn>0) st.wh += 80*iIn*dt/3600; else st.whc += -80*iIn*dt/3600;
+    const vRest = 82.5 - (st.wh-st.whc)*0.02, vin = vRest - iIn*0.04;
+    // temperatures creep toward a load-dependent target
+    st.tMot += (24 + Math.abs(iMot)*0.3 - st.tMot)*0.03*dt*10;
+    st.tFet += (23 + Math.abs(iIn)*0.15 - st.tFet)*0.03*dt*10;
+    st.tach += st.rpm*POLE_PAIRS/60*dt*6;          // VESC tacho: 6 counts per electrical rev
+    render({ erpm: st.rpm*POLE_PAIRS, iIn, iMot, vin, tMot: st.tMot, tFet: st.tFet,
+             tachAbs: st.tach, wh: st.wh, whc: st.whc, mode: 1 + st.loop%3, fault: 0 });
+  }, POLL_MS);
+}
+function stopDemo(){
+  if(!demoTimer) return;
+  clearInterval(demoTimer); demoTimer=null;
+  fwTxt.textContent=demoFwKeep;
+  if(!device?.gatt?.connected) chipBT.show(false);
+}
+document.getElementById('dgDemo').addEventListener('click',()=>{ if(demoTimer) stopDemo(); else { startDemo(); DIAG.close?.(); } });
+if(new URLSearchParams(location.search).has('demo')) startDemo();
 
 // ======================= DIAGNOSTICS PANEL =======================
 // Reads the motor config (0x4C) and app config (0x4F) once per tap, keeps a snapshot per throttle-switch mode,
@@ -658,9 +803,16 @@ const DIAG = (()=>{
   $('dgConnect').onclick=()=>{ if(device?.gatt?.connected){ setStatus('Already connected.'); return; } connect().then(()=>setStatus(device?.gatt?.connected?'Connected.':'Not connected.')); };
   return api;
 })();
-// open the panel: long-press the clock (top right), or load the page with ?diag
+// clock (top right): long-press toggles light/dark mode; tap 5 times in quick succession to open the diagnostics
+// panel (or load the page with ?diag)
+const setTheme = light => document.documentElement.classList.toggle('light', light);
+setTheme(store.get('light', false));
 { const hit=el('rect',{x:640,y:10,width:120,height:34,fill:'transparent'});
-  onPress(hit, ()=>DIAG.open(), null, 700); }
+  const TAPS=5, GAP_MS=600;   // each tap must come within GAP_MS of the previous one
+  let n=0, lastT=0;
+  onPress(hit, ()=>{ const light=!document.documentElement.classList.contains('light'); setTheme(light); store.set('light',light); n=0; },
+               ()=>{ const t=performance.now(); n = (t-lastT<=GAP_MS) ? n+1 : 1; lastT=t;
+                     if(n>=TAPS){ n=0; DIAG.open(); } }, 700); }
 if(new URLSearchParams(location.search).has('diag')) DIAG.open();
 </script>
 </body>

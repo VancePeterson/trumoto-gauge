@@ -150,11 +150,11 @@ txt(LAD.x+50,LAD.y+12,'F',{'font-size':15,class:'dim'}); txt(LAD.x+50,LAD.y+LAD.
 
 // --- bottom bar ---
 el('rect',{x:80,y:362,width:640,height:28,fill:'none',stroke:'#cfcfcf','stroke-width':1.5});
-const tripChip=el('rect',{x:84,y:366,width:58,height:20,fill:'#e8e8e8'}); const tc=txt(113,382,'TRIP',{'text-anchor':'middle','font-size':15}); tc.style.fill='#000';
-const tripTxt = txt(152,384,'0.00',{'font-size':19}); const tripU=txt(205,384,'',{'font-size':13,class:'dim'});
-txt(262,384,'AMP',{'font-size':15});  const ampTxt=txt(345,384,'0',{'text-anchor':'end','font-size':19});
-txt(380,384,'Wh',{'font-size':15});   const whTxt=txt(470,384,'0.0',{'text-anchor':'end','font-size':19});
-txt(500,384,'RGN',{'font-size':15});  const rgnTxt=txt(590,384,'0.0',{'text-anchor':'end','font-size':19});
+const modeChip=el('rect',{x:84,y:366,width:72,height:20,fill:'#e8e8e8'}); const modeTxt=txt(120,382,'MODE-–',{'text-anchor':'middle','font-size':15}); modeTxt.style.fill='#000';
+txt(170,384,'TRIP',{'font-size':15}); const tripTxt = txt(212,384,'0.00',{'font-size':19}); const tripU=txt(258,384,'',{'font-size':13,class:'dim'});
+txt(300,384,'AMP',{'font-size':15});  const ampTxt=txt(372,384,'0',{'text-anchor':'end','font-size':19});
+txt(402,384,'Wh',{'font-size':15});   const whTxt=txt(484,384,'0.0',{'text-anchor':'end','font-size':19});
+txt(514,384,'RGN',{'font-size':15});  const rgnTxt=txt(600,384,'0.0',{'text-anchor':'end','font-size':19});
 const fwTxt = txt(250,34,'',{'font-size':13,class:'dim'});
 
 // ======================= MATH =======================
@@ -189,6 +189,7 @@ function render(v){
   const m=tachToM(v.tachAbs-tripStartTach);
   tripTxt.textContent = (useKmh? m/1000 : m/1609.344).toFixed(2); tripU.textContent = useKmh?'km':'mi';
   ampTxt.textContent = Math.round(v.iIn); whTxt.textContent = v.wh.toFixed(1); rgnTxt.textContent = v.whc.toFixed(1);
+  modeTxt.textContent = 'MODE-'+(v.mode??'–');
   chipRegen.show(v.iIn < -0.5);
   chipFault.show(v.fault!==0);
   warnTxt.textContent = v.fault!==0 ? FAULTS[v.fault]||('FAULT '+v.fault)
@@ -227,7 +228,8 @@ function handle(p){
     busy=false; let o=1;
     const i16=s=>{const v=dv.getInt16(o)/s;o+=2;return v;}, i32=s=>{const v=dv.getInt32(o)/s;o+=4;return v;};
     render({tFet:i16(10),tMot:i16(10),iMot:i32(100),iIn:i32(100),id:i32(100),iq:i32(100),duty:i16(1000),erpm:i32(1),
-            vin:i16(10),ah:i32(1e4),ahc:i32(1e4),wh:i32(1e4),whc:i32(1e4),tach:i32(1),tachAbs:i32(1),fault:p[o]});
+            vin:i16(10),ah:i32(1e4),ahc:i32(1e4),wh:i32(1e4),whc:i32(1e4),tach:i32(1),tachAbs:i32(1),fault:p[o],
+            mode:p.length>=75?p[p.length-1]:null});  // TruMoto extra byte: throttle switch position 1-3
   }
 }
 async function poll(){ if(busy){busy=false;return;} busy=true; try{await rx.writeValue(PKT_VALUES);}catch(e){} }

@@ -6,14 +6,14 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Cricket Dash</title>
 <style>
-  /* theme colors: dark (default) and light (long-press the clock). Everything not listed here is the same in both. */
+  /* theme colors: dark (default) and light (double-tap anywhere). Everything not listed here is the same in both. */
   :root { --bg:#000; --fg:#e8e8e8; --hi:#fff; --dim:#85888c; --bar:#9a9da1;
           --cell:#2a2d31; --frame:#1c1f22; --chip-txt:#000; }
   :root.light { --bg:#fff; --fg:#000; --hi:#000; --chip-txt:#fff;
                 --cell:#e3e5e8; --frame:#d0d2d5; }   /* placeholders until light colors are chosen */
   /* top & bottom banners are solid black in both themes, so their contents keep the dark-theme colors */
   :root.light .band { --fg:#e8e8e8; --hi:#fff; --dim:#85888c; --cell:#2a2d31; --chip-txt:#000; }
-  html, body { margin:0; height:100%; background:var(--bg); overflow:hidden; -webkit-user-select:none; user-select:none; }
+  html, body { touch-action:manipulation; margin:0; height:100%; background:var(--bg); overflow:hidden; -webkit-user-select:none; user-select:none; }
   body { display:flex; align-items:center; justify-content:center; }
   svg { width:100vw; height:100vh; display:block; }
   text { font-family:"Avenir Next Condensed","Helvetica Neue",Arial,sans-serif; font-weight:700; fill:var(--fg); }
@@ -607,6 +607,7 @@ function handle(p){
             vin:i16(10),ah:i32(1e4),ahc:i32(1e4),wh:i32(1e4),whc:i32(1e4),tach:i32(1),tachAbs:i32(1),fault:p[o],
             mode:p.length>=75?p[p.length-1]:null});  // TruMoto extra byte: throttle switch position 1-3
     DIAG.mode = p.length>=75 ? p[p.length-1] : null;
+    DIAG.values = p;                                 // raw reply, so diagnostics can show where the mode byte really is
   }
 }
 async function poll(){ if(busy){busy=false;return;} busy=true; try{await rx.writeValue(PKT_VALUES);}catch(e){} }
@@ -699,7 +700,7 @@ if(new URLSearchParams(location.search).has('demo')) startDemo();
 const DIAG = (()=>{
   const $=id=>document.getElementById(id);
   const panel=$('diag'), out=$('dgOut'), status=$('dgStatus');
-  const snaps=[];                       // {mode, label, mc:Uint8Array, ap:Uint8Array, t}
+  const snaps=[];                       // {mode, label, mc:Uint8Array, ap:Uint8Array, vals:Uint8Array, t}
   let pending=null;                     // {cmd, resolve, timer}
   // known motor-config fields (byte offset in the reply, counting the command byte as 0) — VESC 6.05 layout
   const MC_FIELDS=[
@@ -730,9 +731,10 @@ const DIAG = (()=>{
       setStatus('Reading app config…');    const ap=await request(CMD_GET_APPCONF,PKT_APPCONF);
       const mode=api.mode, label=modeLabel(mode);
       const i=snaps.findIndex(s=>s.mode===mode && mode!=null);
-      const snap={mode,label,mc,ap,t:new Date()};
+      const vals=api.values ? api.values.slice() : new Uint8Array(0);   // latest live-values reply at this switch position
+      const snap={mode,label,mc,ap,vals,t:new Date()};
       if(i>=0) snaps[i]=snap; else snaps.push(snap);
-      setStatus(`Saved ${label} (motor ${mc.length} B, app ${ap.length} B). ${snaps.length} mode(s) captured — switch modes and read again.`);
+      setStatus(`Saved ${label} (motor ${mc.length} B, app ${ap.length} B, values ${vals.length} B, last byte ${vals.length?vals[vals.length-1]:'–'}). ${snaps.length} mode(s) captured — switch modes and read again.`);
       draw();
     }catch(e){ setStatus('Error: '+e.message); }
   }
@@ -762,7 +764,7 @@ const DIAG = (()=>{
     t+='field'.padEnd(30)+snaps.map(s=>s.label.padStart(10)).join('')+'\n';
     for(const f of MC_FIELDS) t+=f.name.padEnd(30)+snaps.map(s=>(f32(s.mc,f.off).toFixed(1)+f.unit).padStart(10)).join('')+'\n';
     t+='Battery power max (≈ A × 76.6 V)'.padEnd(30)+snaps.map(s=>((f32(s.mc,17)*76.6/1000).toFixed(1)+'kW').padStart(10)).join('')+'\n';
-    for(const [key,name] of [['mc','MOTOR CONFIG (0x4C)'],['ap','APP CONFIG (0x4F)']]){
+    for(const [key,name] of [['mc','MOTOR CONFIG (0x4C)'],['ap','APP CONFIG (0x4F)'],['vals','LIVE VALUES (0x42) — telemetry bytes drift; look for one that tracks the switch']]){
       const rs=diffRanges(key);
       t+=`\n${name}: `+(snaps.length<2 ? 'need 2+ modes to compare\n' : rs.length ? `${rs.length} changed range(s)\n` : 'IDENTICAL across modes\n');
       for(const r of rs){
@@ -772,7 +774,7 @@ const DIAG = (()=>{
       }
     }
     t+='\nRaw snapshots (hex)\n';
-    for(const s of snaps){ t+=`${s.label} motor: ${hex(s.mc,0,s.mc.length)}\n${s.label} app:   ${hex(s.ap,0,s.ap.length)}\n`; }
+    for(const s of snaps){ t+=`${s.label} motor: ${hex(s.mc,0,s.mc.length)}\n${s.label} app:   ${hex(s.ap,0,s.ap.length)}\n${s.label} values (${s.vals.length} B): ${hex(s.vals,0,s.vals.length)}\n`; }
     return t;
   }
 
@@ -795,7 +797,7 @@ const DIAG = (()=>{
       setStatus('Clipboard blocked — report text is selected, use Copy from the menu.'); }
   }
 
-  const api={ mode:null, onReply, open(){ panel.classList.add('open'); draw(); }, close(){ panel.classList.remove('open'); } };
+  const api={ mode:null, values:null, onReply, open(){ panel.classList.add('open'); draw(); }, close(){ panel.classList.remove('open'); } };
   $('dgRead').onclick=read;
   $('dgClear').onclick=()=>{ snaps.length=0; draw(); setStatus('Cleared.'); };
   $('dgCopy').onclick=copy;
@@ -803,16 +805,28 @@ const DIAG = (()=>{
   $('dgConnect').onclick=()=>{ if(device?.gatt?.connected){ setStatus('Already connected.'); return; } connect().then(()=>setStatus(device?.gatt?.connected?'Connected.':'Not connected.')); };
   return api;
 })();
-// clock (top right): long-press toggles light/dark mode; tap 5 times in quick succession to open the diagnostics
-// panel (or load the page with ?diag)
+// double-tap anywhere on the dash toggles light/dark mode. Listens on pointerup in the capture phase so it still
+// sees taps on the tap targets (whose click handlers stop propagation).
 const setTheme = light => document.documentElement.classList.toggle('light', light);
 setTheme(store.get('light', false));
+{ const DBL_MS=350, DBL_PX=40;   // second tap must land within DBL_MS and DBL_PX of the first
+  let lastT=-1e9, lastX=0, lastY=0;
+  svg.addEventListener('pointerup',e=>{
+    const t=performance.now();
+    if(t-lastT<=DBL_MS && Math.hypot(e.clientX-lastX,e.clientY-lastY)<=DBL_PX){
+      const light=!document.documentElement.classList.contains('light'); setTheme(light); store.set('light',light);
+      lastT=-1e9; return;   // a third tap starts a new pair
+    }
+    lastT=t; lastX=e.clientX; lastY=e.clientY;
+  },true);
+  svg.addEventListener('dblclick',e=>e.preventDefault());   // no double-tap zoom / text selection
+}
+// clock (top right): tap 5 times in quick succession to open the diagnostics panel (or load the page with ?diag)
 { const hit=el('rect',{x:640,y:10,width:120,height:34,fill:'transparent'});
   const TAPS=5, GAP_MS=600;   // each tap must come within GAP_MS of the previous one
   let n=0, lastT=0;
-  onPress(hit, ()=>{ const light=!document.documentElement.classList.contains('light'); setTheme(light); store.set('light',light); n=0; },
-               ()=>{ const t=performance.now(); n = (t-lastT<=GAP_MS) ? n+1 : 1; lastT=t;
-                     if(n>=TAPS){ n=0; DIAG.open(); } }, 700); }
+  hit.addEventListener('click',()=>{ const t=performance.now(); n = (t-lastT<=GAP_MS) ? n+1 : 1; lastT=t;
+                                     if(n>=TAPS){ n=0; DIAG.open(); } }); }
 if(new URLSearchParams(location.search).has('diag')) DIAG.open();
 </script>
 </body>

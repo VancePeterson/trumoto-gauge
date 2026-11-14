@@ -80,6 +80,8 @@ const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 // TruMoto shifts standard VESC command IDs by +62. READ-ONLY commands only.
 const CMD_FW_VERSION = 0x3E, CMD_GET_VALUES = 0x42;
+// TruMoto appends to the 74-byte VESC values reply: throttle switch position (1-3) at byte 74, then 6 floats (IMU?)
+const MODE_BYTE = 74;
 
 function crc16(bytes){let c=0;for(const b of bytes){c^=b<<8;for(let i=0;i<8;i++)c=(c&0x8000)?((c<<1)^0x1021)&0xffff:(c<<1)&0xffff;}return c;}
 function frame(p){p=Uint8Array.from(p);const c=crc16(p);return Uint8Array.from([2,p.length,...p,c>>8,c&255,3]);}
@@ -605,8 +607,8 @@ function handle(p){
     const i16=s=>{const v=dv.getInt16(o)/s;o+=2;return v;}, i32=s=>{const v=dv.getInt32(o)/s;o+=4;return v;};
     render({tFet:i16(10),tMot:i16(10),iMot:i32(100),iIn:i32(100),id:i32(100),iq:i32(100),duty:i16(1000),erpm:i32(1),
             vin:i16(10),ah:i32(1e4),ahc:i32(1e4),wh:i32(1e4),whc:i32(1e4),tach:i32(1),tachAbs:i32(1),fault:p[o],
-            mode:p.length>=75?p[p.length-1]:null});  // TruMoto extra byte: throttle switch position 1-3
-    DIAG.mode = p.length>=75 ? p[p.length-1] : null;
+            mode:p.length>MODE_BYTE?p[MODE_BYTE]:null});
+    DIAG.mode = p.length>MODE_BYTE ? p[MODE_BYTE] : null;
     DIAG.values = p;                                 // raw reply, so diagnostics can show where the mode byte really is
   }
 }

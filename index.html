@@ -808,7 +808,8 @@ const DIAG = (()=>{
   return api;
 })();
 // clock (top right): tap 5 times in quick succession to open the diagnostics panel (or load the page with ?diag)
-const clockHit=el('rect',{x:640,y:10,width:120,height:34,fill:'transparent'});
+const CLOCK_ZONE={x:600,y:0,width:200,height:60};   // whole top-right corner, so a slightly-off tap still counts
+const clockHit=el('rect',{...CLOCK_ZONE,fill:'transparent'});
 { const TAPS=5, GAP_MS=600;   // each tap must come within GAP_MS of the previous one
   let n=0, lastT=0;
   clockHit.addEventListener('click',()=>{ const t=performance.now(); n = (t-lastT<=GAP_MS) ? n+1 : 1; lastT=t;
@@ -820,7 +821,8 @@ setTheme(store.get('light', false));
 { const DBL_MS=350, DBL_PX=40;   // second tap must land within DBL_MS and DBL_PX of the first
   let lastT=-1e9, lastX=0, lastY=0;
   svg.addEventListener('pointerup',e=>{
-    if(e.target===clockHit){ lastT=-1e9; return; }   // clock taps are for the diagnostics panel
+    const p=new DOMPoint(e.clientX,e.clientY).matrixTransform(svg.getScreenCTM().inverse());   // tap in dash coords
+    if(p.x>=CLOCK_ZONE.x && p.y<=CLOCK_ZONE.y+CLOCK_ZONE.height){ lastT=-1e9; return; }   // clock taps are for the diagnostics panel
     const t=performance.now();
     if(t-lastT<=DBL_MS && Math.hypot(e.clientX-lastX,e.clientY-lastY)<=DBL_PX){
       const light=!document.documentElement.classList.contains('light'); setTheme(light); store.set('light',light);

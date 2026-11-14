@@ -805,13 +805,20 @@ const DIAG = (()=>{
   $('dgConnect').onclick=()=>{ if(device?.gatt?.connected){ setStatus('Already connected.'); return; } connect().then(()=>setStatus(device?.gatt?.connected?'Connected.':'Not connected.')); };
   return api;
 })();
-// double-tap anywhere on the dash toggles light/dark mode. Listens on pointerup in the capture phase so it still
+// clock (top right): tap 5 times in quick succession to open the diagnostics panel (or load the page with ?diag)
+const clockHit=el('rect',{x:640,y:10,width:120,height:34,fill:'transparent'});
+{ const TAPS=5, GAP_MS=600;   // each tap must come within GAP_MS of the previous one
+  let n=0, lastT=0;
+  clockHit.addEventListener('click',()=>{ const t=performance.now(); n = (t-lastT<=GAP_MS) ? n+1 : 1; lastT=t;
+                                          if(n>=TAPS){ n=0; DIAG.open(); } }); }
+// double-tap anywhere on the dash except the clock toggles light/dark mode. Listens on pointerup in the capture phase so it still
 // sees taps on the tap targets (whose click handlers stop propagation).
 const setTheme = light => document.documentElement.classList.toggle('light', light);
 setTheme(store.get('light', false));
 { const DBL_MS=350, DBL_PX=40;   // second tap must land within DBL_MS and DBL_PX of the first
   let lastT=-1e9, lastX=0, lastY=0;
   svg.addEventListener('pointerup',e=>{
+    if(e.target===clockHit){ lastT=-1e9; return; }   // clock taps are for the diagnostics panel
     const t=performance.now();
     if(t-lastT<=DBL_MS && Math.hypot(e.clientX-lastX,e.clientY-lastY)<=DBL_PX){
       const light=!document.documentElement.classList.contains('light'); setTheme(light); store.set('light',light);
@@ -821,12 +828,6 @@ setTheme(store.get('light', false));
   },true);
   svg.addEventListener('dblclick',e=>e.preventDefault());   // no double-tap zoom / text selection
 }
-// clock (top right): tap 5 times in quick succession to open the diagnostics panel (or load the page with ?diag)
-{ const hit=el('rect',{x:640,y:10,width:120,height:34,fill:'transparent'});
-  const TAPS=5, GAP_MS=600;   // each tap must come within GAP_MS of the previous one
-  let n=0, lastT=0;
-  hit.addEventListener('click',()=>{ const t=performance.now(); n = (t-lastT<=GAP_MS) ? n+1 : 1; lastT=t;
-                                     if(n>=TAPS){ n=0; DIAG.open(); } }); }
 if(new URLSearchParams(location.search).has('diag')) DIAG.open();
 </script>
 </body>
